@@ -97,12 +97,12 @@ def in_window(case, ts: Optional[str]) -> bool:
     if not (since or until) or not ts:
         return True
     try:
-        t = datetime.fromisoformat(str(ts))
+        t = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
         if t.tzinfo is None:
             t = t.replace(tzinfo=timezone.utc)
-        if since and t < datetime.fromisoformat(str(since)).replace(tzinfo=timezone.utc):
+        if since and t < datetime.fromisoformat(str(since).replace("Z", "+00:00")).replace(tzinfo=timezone.utc):
             return False
-        if until and t > datetime.fromisoformat(str(until)).replace(tzinfo=timezone.utc):
+        if until and t > datetime.fromisoformat(str(until).replace("Z", "+00:00")).replace(tzinfo=timezone.utc):
             return False
     except ValueError:
         return True

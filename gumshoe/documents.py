@@ -176,7 +176,8 @@ def _pptx(p: Path) -> str:
         slides = sorted((n for n in z.namelist() if re.match(r"ppt/slides/slide\d+\.xml$", n)),
                         key=lambda s: int(re.search(r"slide(\d+)", s).group(1)))
         for n in slides:
-            out.append(f"### slide {re.search(r'slide(\d+)', n).group(1)}")
+            slide_no = re.search(r"slide(\d+)", n).group(1)
+            out.append(f"### slide {slide_no}")
             root = ET.fromstring(z.read(n))
             for t in root.iter(f"{{{XML_NS['d']}}}t"):
                 if t.text and t.text.strip():
@@ -190,7 +191,8 @@ def _odf(p: Path) -> str:
     out = []
     in_tables = set()
     for tbl in root.iter(f"{{{XML_NS['table']}}}table"):
-        out.append(f"### sheet: {tbl.get(f'{{{XML_NS['table']}}}name', 'table')}")
+        name_attr = "{" + XML_NS["table"] + "}name"
+        out.append(f"### sheet: {tbl.get(name_attr, 'table')}")
         for i, row in enumerate(tbl.iter(f"{{{XML_NS['table']}}}table-row"), 1):
             cells = []
             for c in row.iter(f"{{{XML_NS['table']}}}table-cell"):
