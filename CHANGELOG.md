@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- Shell-history review for every account (root, users, service accounts with a home): inventory
+  plus per-line findings for account changes, log handling, compiling, history suppression and the
+  existing suspicious-command heuristics, each with path and line number.
+- Web-app inventory detects Drupal and Joomla (with versions) and finds apps nested one level below a
+  site root; Drupal's `sites/default/settings.php` is read with secrets masked.
+- `collect` records external tool versions (`collected/tool_versions.json` + custody record).
+- `setup/wsl/mount_image.sh`: read-only mount helper for E01 (ewfmount), VHDX/VMDK (qemu-nbd) and
+  raw images, with partition selection and LVM activation; `--umount` reverses it.
+- `tests/testvm/`: Hyper-V builder for an aaPanel + MariaDB + WordPress test host that writes its own
+  `GROUND_TRUTH.md`; `docs/TESTING.md` with the public reference image recipe and scorecard.
+- Index globs cover history files in service-account homes.
+
 ## 0.1.0 — initial public release
 
 - Case directories, image hash verification (single pass, SHA-256 + MD5), read-only mount check,

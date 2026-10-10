@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import gzip
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -67,6 +68,42 @@ def run_cmd(case, tool: str, cmd: list[str], out_dir: Path, stdin_path: Optional
     rec["outputs"] = _record_outputs(out_dir)
     case.custody.append("tool_end", rec)
     return rec
+
+
+# ---- tool versions ---------------------------------------------------------------
+VERSION_FLAGS = {"uac": ["--version"], "loki": ["--version"], "goaccess": ["--version"], "chainsaw": ["--version"],
+                 "clamscan": ["--version"], "log2timeline.py": ["--version"], "mariadbd": ["--version"], "mysqld": ["--version"],
+                 "ollama": ["--version"], "python3": ["--version"], "yara": ["--version"], "ewfinfo": ["-V"],
+                 "sha256sum": ["--version"]}
+
+
+def record_tool_versions(case, extra: Optional[dict[str, list[str]]] = None) -> dict[str, Any]:
+    """Record the version string of every external tool on PATH (as configured) into
+    collected/tool_versions.json and the custody log, so a run can be reproduced with the same builds."""
+    import shutil as _shutil
+    want: dict[str, list[str]] = {}
+    for name, t in (case.cfg.get("tools") or {}).items():
+        b = t.get("bin") or name
+        want[b] = VERSION_FLAGS.get(os.path.basename(b), ["--version"])
+    for b, flags in VERSION_FLAGS.items():
+        want.setdefault(b, flags)
+    for b, flags in (extra or {}).items():
+        want[b] = flags
+    out: dict[str, Any] = {"recorded": utc_now(), "python": sys.version.split()[0], "platform": platform.platform(), "tools": {}}
+    for b, flags in sorted(want.items()):
+        path = _shutil.which(b)
+        if not path:
+            out["tools"][b] = {"path": None}
+            continue
+        try:
+            r = subprocess.run([path] + flags, capture_output=True, text=True, timeout=30, errors="replace")
+            text = (r.stdout or r.stderr or "").strip().splitlines()
+            out["tools"][b] = {"path": path, "version": text[0][:200] if text else "", "exit_code": r.returncode}
+        except (OSError, subprocess.TimeoutExpired) as e:
+            out["tools"][b] = {"path": path, "error": str(e)}
+    case.write_json("tool_versions.json", out)
+    case.custody.append("tool_versions", {"tools": {k: v.get("version") for k, v in out["tools"].items() if v.get("path")}})
+    return out
 
 
 # ---- UAC -----------------------------------------------------------------------

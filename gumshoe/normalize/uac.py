@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from .base import Finding, with_provenance, read_lines, is_binary_file
+from .base import Finding, with_provenance, read_lines, is_binary_file, sev_rank
 from ..integrity import hash_file
 
 BODYFILE_COLS = ["md5", "name", "inode", "mode", "uid", "gid", "size", "atime", "mtime", "ctime", "crtime"]
@@ -270,6 +270,83 @@ def _suspicious_command(case, cmd: str) -> list[str]:
     return reasons
 
 
+# Shell-history review: the classic "what did the operator type" step. Patterns are categories of
+# administrative action worth a second look (account changes, log handling, compiling in temp dirs,
+# history suppression); each hit is reported with its line so the examiner reads it in context.
+HISTORY_FILES = (".bash_history", ".zsh_history", ".sh_history", ".ash_history", ".mysql_history",
+                 ".python_history", ".psql_history")
+HISTORY_PATTERNS: list[tuple[str, str, str]] = [  # (regex, label, severity)
+    (r"\b(useradd|adduser|usermod|userdel|chsh|passwd|chpasswd|visudo|gpasswd)\b", "account or privilege change", "medium"),
+    (r"\b(sudo\s+su\b|sudo\s+-i\b|sudo\s+-s\b|su\s+-\s*$|su\s+root)", "switch to root", "low"),
+    (r"(var/log/|/lastlog\b|/wtmp\b|/btmp\b|/utmp\b|auth\.log|\bsecure\b)", "touches a log file", "medium"),
+    (r"\b(history\s+-c|unset\s+HISTFILE|HISTFILE=|HISTSIZE=0|shred\b|wipe\b)", "history or file wiping", "high"),
+    (r"\b(gcc|cc|g\+\+|make|tcc)\b", "compiles source", "medium"),
+    (r"\bchmod\s+(\+x|[0-7]*7[0-7]*)\b", "marks executable", "low"),
+    (r"\b(nc|ncat|netcat|socat)\b|/dev/tcp/", "network listener / relay tool", "high"),
+    (r"\b(crontab\s+-|systemctl\s+(enable|start)|update-rc\.d|rc\.local)\b", "scheduling or service change", "medium"),
+    (r"\b(scp|sftp|rsync|ftp|tftp)\b", "file transfer", "low"),
+    (r"\b(mysqldump|mysql\s+-u|mariadb\s+-u|psql\b)", "database access", "low"),
+    (r"\b(tar|zip|7z|rar)\b.*\b(www|html|wwwroot|home|etc)\b", "archives system or web content", "low"),
+]
+
+
+def check_shell_history(case, uac_root, accounts: list[dict[str, Any]]) -> tuple[list[Finding], list[dict[str, Any]]]:
+    """Find every shell/database history file in the home directory of each account (plus /root),
+    inventory them, and flag lines matching HISTORY_PATTERNS or _suspicious_command."""
+    findings: list[Finding] = []
+    inv: list[dict[str, Any]] = []
+    homes = {"root": "root"}
+    for a in accounts:
+        home = (a.get("home") or "").strip("/")
+        if home and home not in ("nonexistent", "dev/null", "bin", "sbin", "usr/sbin", "var/run", "run"):
+            homes.setdefault(a["user"], home)
+    seen: set[str] = set()
+    for user, home in homes.items():
+        for name in HISTORY_FILES:
+            rel = f"{home}/{name}"
+            if rel in seen:
+                continue
+            seen.add(rel)
+            p = _collected_or_mount(case, uac_root, rel)
+            if not p or is_binary_file(p):
+                continue
+            lines = [(no, l.rstrip("\n")) for no, l in read_lines(p)]
+            entry = {"user": user, "file": "/" + rel, "lines": len(lines), "size": p.stat().st_size, "flagged": 0}
+            flagged: list[dict[str, Any]] = []
+            for no, line in lines:
+                if not line.strip() or line.startswith("#"):
+                    continue
+                reasons = list(_suspicious_command(case, line))
+                sev = "medium" if reasons else "info"
+                for rx, label, s in HISTORY_PATTERNS:
+                    if re.search(rx, line):
+                        reasons.append(label)
+                        if sev_rank(s) > sev_rank(sev):
+                            sev = s
+                if reasons:
+                    flagged.append({"line": no, "command": line[:300], "reasons": reasons, "severity": sev})
+            entry["flagged"] = len(flagged)
+            inv.append(entry)
+            tail = "\n".join(l for _, l in lines[-15:])
+            findings.append(_finding_from_file(case, uac_root, "/" + rel, severity="info", rule="uac.history",
+                                               title=f"Shell history for {user}: {len(lines)} lines, {len(flagged)} worth reading ({name})",
+                                               description="Last lines are quoted; every flagged line is listed in inventory.json under "
+                                                           "system.shell_history. History files are user-writable and carry no timestamps "
+                                                           "unless HISTTIMEFORMAT was set, so treat them as leads, not as a log.",
+                                               excerpt=tail or None, tags=["history", "account"],
+                                               extra={"user": user, "flagged": flagged[:200]}))
+            # one finding per flagged line of medium or higher so each is citable and archivable on its own
+            for fl in flagged:
+                if sev_rank(fl["severity"]) < sev_rank("medium"):
+                    continue
+                findings.append(_finding_from_file(case, uac_root, "/" + rel, severity=fl["severity"], rule="uac.history_command",
+                                                   title=f"{user} history: {'; '.join(fl['reasons'])}",
+                                                   description=f"Command at line {fl['line']} of {name} for account {user}.",
+                                                   line=fl["line"], excerpt=fl["command"], tags=["history", "account"],
+                                                   extra={"user": user, "reasons": fl["reasons"]}))
+    return findings, inv
+
+
 def check_cron(case, uac_root) -> tuple[list[Finding], list[dict[str, Any]]]:
     findings: list[Finding] = []
     inventory: list[dict[str, Any]] = []
@@ -435,6 +512,7 @@ def run(case) -> list[Finding]:
                                 title="No UAC bodyfile found; timeline and timestomp checks skipped",
                                 description=f"Expected UAC output under {raw_dir}. Run `gumshoe collect --tools uac`."))
     f, inv = check_passwd(case, uac_root); findings += f; inventory.update(inv)
+    f, inv = check_shell_history(case, uac_root, inventory.get("accounts", [])); findings += f; inventory["shell_history"] = inv
     findings += check_preload(case, uac_root)
     f, inv = check_cron(case, uac_root); findings += f; inventory["cron"] = inv
     f, inv = check_systemd(case, uac_root); findings += f; inventory["systemd"] = inv

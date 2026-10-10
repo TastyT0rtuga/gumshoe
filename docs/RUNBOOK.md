@@ -64,8 +64,13 @@ Do not go past this line until step 12 is all OK.
     You should see "The disk was attached".
     - Error 0x80070001 or hang → unmount in Arsenal, re-mount, try again once; if it still fails, use the
       no-bridge route in `gumshoe mount-help` (B): `ewfmount` inside WSL straight from `/mnt/d/case/server.E01`.
-16. In WSL: `lsblk` → find the new device (e.g. `sdc` with partitions `sdc1`, `sdc2`). The Ubuntu root
-    is usually the largest ext4 partition. Then:
+16. In WSL, the short way: `sudo setup/wsl/mount_image.sh /dev/sdc` (the device `lsblk` shows for the
+    attached disk) — it lists the partitions, activates LVM if present, picks the root filesystem, and
+    mounts it at `/mnt/evidence` with `ro,noatime,noexec,nosuid,noload`. It also takes an E01 directly
+    (`sudo setup/wsl/mount_image.sh /mnt/d/case/server.E01`, no Arsenal needed) or a VHDX. Use
+    `--part N` / `--lv VG/LV` when it picks wrong; `sudo setup/wsl/mount_image.sh --umount` undoes it.
+    The long way, if you prefer to see each step: `lsblk` → find the new device (e.g. `sdc` with
+    partitions `sdc1`, `sdc2`). The Ubuntu root is usually the largest ext4 partition. Then:
     `sudo mkdir -p /mnt/evidence && sudo mount -o ro,noload,noexec,nosuid /dev/sdcN /mnt/evidence`
     `ls /mnt/evidence` should show `etc  www  var  root ...`.
     - "unknown filesystem type LVM2_member" → `sudo vgscan && sudo vgchange -ay && lsblk`, then mount

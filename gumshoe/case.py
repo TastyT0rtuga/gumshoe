@@ -78,6 +78,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "etc/passwd", "etc/group", "etc/hosts", "etc/crontab", "etc/cron.d/*", "etc/cron.*/*",
             "var/spool/cron/crontabs/*", "etc/systemd/system/*.service", "etc/rc.local",
             "etc/ssh/sshd_config", "root/.bash_history", "root/.mysql_history", "home/*/.bash_history",
+            "var/mail/.bash_history", "var/www/.bash_history", "var/spool/*/.bash_history", "home/*/.mysql_history",
             "root/.ssh/authorized_keys", "home/*/.ssh/authorized_keys",
             "www/server/panel/vhost/nginx/*.conf", "www/server/panel/vhost/apache/*.conf",
             "www/server/cron/*", "www/server/panel/logs/request/*.log",

@@ -142,6 +142,15 @@ def make_documents(root: Path) -> None:
     _write(wp / "wp-content/themes/plain/style.css", "/*\nTheme Name: Plain\nVersion: 2.0\n*/\n")
     _write(wp / ".htaccess", "RewriteEngine On\n")
     _write(root / "www/server/php/74/etc/php.ini", "[PHP]\nallow_url_include = Off\ndisable_functions = \nexpose_php = Off\n")
+    # a Drupal-shaped app nested one level below a plain site root (the layout of the public reference image)
+    dr = root / "www/wwwroot/example.local/intranet"
+    _write(dr / "index.php", "<?php\nrequire_once 'includes/bootstrap.inc';\n")
+    _write(dr / "includes/bootstrap.inc", "<?php\ndefine('VERSION', '7.26');\n")
+    _write(dr / "sites/default/settings.php", "<?php\n$databases['default']['default'] = array('database' => 'intranetdb', 'username' => 'intranet', 'password' => 'also-not-shown');\n")
+    # shell histories: ordinary admin work; two lines are the kind an examiner reads twice (account change, log file)
+    _write(root / "root/.bash_history", "apt update\napt upgrade -y\nuseradd -m -s /bin/bash deployer\nusermod -aG sudo deployer\n"
+                                        "tail -n 50 /var/log/auth.log\nsystemctl restart nginx\nexit\n")
+    _write(root / "home/ubuntu/.bash_history", "ls\ncd /www/wwwroot\nsudo su -\nexit\n")
 
 
 def _write(p: Path, text: str, mtime: float | None = None) -> None:
@@ -284,6 +293,12 @@ def run_selftest(verbose: bool = True) -> bool:
         case.custody.append("readonly_check", ro)
         ok, n, _, msg = case.custody.verify()
         check("custody chain verifies", ok and n >= 2, msg)
+        from gumshoe.runners import record_tool_versions
+        tv = record_tool_versions(case)
+        tvj = case.read_json("tool_versions.json", {})
+        check("tool versions recorded (collected/tool_versions.json + custody record) for reproducibility",
+              tvj.get("python") == tv["python"] and "python3" in tvj.get("tools", {}) and
+              any(r.action == "tool_versions" for r in case.custody.tail(5)), f"{len(tvj.get('tools', {}))} tools probed")
         # 2. tool samples + normalizers
         make_tool_samples(case, root)
         findings = normalize_all(case, log=(print if verbose else (lambda *a, **k: None)))
@@ -400,6 +415,18 @@ def run_selftest(verbose: bool = True) -> bool:
               any(p["name"] == "hello-example" and p["version"] == "1.4.0" for p in blog.get("plugins", [])) and
               any(t["name"] == "plain" and t["version"] == "2.0" for t in blog.get("themes", [])) and
               "index.php" in blog.get("php", {}).get("entry_points", []), f"{blog.get('framework')} {blog.get('version')} {facts}")
+        intranet = sites.get("intranet", {})
+        ifacts = (intranet.get("configs") or [{}])[0].get("facts", {}) if intranet.get("configs") else {}
+        check("webapp inventory: nested Drupal app found below a plain site root, version read, settings.php password masked",
+              intranet.get("framework") == "drupal" and intranet.get("version") == "7.26" and
+              "also-not-shown" not in json.dumps(wa) and intranet.get("configs"), f"{intranet.get('framework')} {intranet.get('version')} {ifacts}")
+        hist = [f for f in findings if f["rule"] == "uac.history"]
+        hcmd = [f for f in findings if f["rule"] == "uac.history_command"]
+        check("shell history review: every history file inventoried, account change and log access lines raised with line numbers",
+              {f["extra"]["user"] for f in hist} >= {"root", "ubuntu"} and
+              any("account or privilege change" in f["title"] and f["path"] == "/root/.bash_history" and f["line"] == 3 for f in hcmd) and
+              any("touches a log file" in f["title"] and f["line"] == 5 for f in hcmd) and
+              not any(f["path"] == "/home/ubuntu/.bash_history" for f in hcmd), f"{len(hist)} history files, {len(hcmd)} flagged commands")
         check("php.ini hardening facts: empty disable_functions raised as a low finding",
               any(f["rule"] == "php.disable_functions_empty" for f in findings) and not any(f["rule"] == "php.allow_url_include" for f in findings))
         # memory: brief, notes, pins, session carry-forward (mechanics; no model needed)

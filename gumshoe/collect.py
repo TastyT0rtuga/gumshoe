@@ -43,6 +43,13 @@ def run_tools(case, tools: Optional[list[str]] = None, skip: Optional[list[str]]
     wanted = tools or [t for t in TOOL_ORDER + ["chainsaw"] if cfg_tools.get(t, {}).get("enabled")]
     skip = set(skip or [])
     results: dict[str, Any] = {}
+    from .runners import record_tool_versions
+    try:
+        versions = record_tool_versions(case)
+        present = [f"{k} {v.get('version', '')}".strip() for k, v in versions["tools"].items() if v.get("path")]
+        log("[tools] versions recorded in collected/tool_versions.json: " + ("; ".join(present) if present else "none found on PATH"))
+    except Exception as e:  # never let bookkeeping stop a collection
+        log(f"[tools] could not record tool versions: {e}")
     # conversion must precede chainsaw
     needs_conversion = "chainsaw" in wanted and "chainsaw" not in skip
     for name in [t for t in TOOL_ORDER if t in wanted and t not in skip]:

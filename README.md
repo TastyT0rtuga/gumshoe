@@ -19,7 +19,7 @@ python gumshoe.py selftest          # 50 checks, no model or evidence needed
 python gumshoe.py --help
 ```
 
-Air-gapped install: [docs/RUNBOOK.md](docs/RUNBOOK.md). Adding evidence types: [docs/PROFILES.md](docs/PROFILES.md).
+Air-gapped install: [docs/RUNBOOK.md](docs/RUNBOOK.md). Adding evidence types: [docs/PROFILES.md](docs/PROFILES.md). Validating against images with a known answer: [docs/TESTING.md](docs/TESTING.md).
 Contributing: [CONTRIBUTING.md](CONTRIBUTING.md). Security: [SECURITY.md](SECURITY.md).
 
 Established tools do the finding. Gumshoe runs them against a read-only mount, keeps
@@ -46,7 +46,7 @@ profile would reuse and need.
 
 | Step | Tool | Finds | Gumshoe glue |
 | --- | --- | --- | --- |
-| 1 | [UAC](https://github.com/tclahr/uac) `-m /mnt/evidence` | Linux triage set + bodyfile (atime/mtime/ctime/crtime) | structural checks on the collected copies; timeline; ctime-vs-mtime timestomp check; change bursts |
+| 1 | [UAC](https://github.com/tclahr/uac) `-m /mnt/evidence` | Linux triage set + bodyfile (atime/mtime/ctime/crtime) | structural checks on the collected copies (accounts, cron, systemd, `authorized_keys`, sshd/sudoers, shell histories of every account); timeline; ctime-vs-mtime timestomp check; change bursts |
 | 2 | [Loki](https://github.com/Neo23x0/Loki) + [signature-base](https://github.com/Neo23x0/signature-base) | YARA / filename / hash IOC hits in web roots, panel, temp dirs, home dirs, DB plugin dir | parses the log into findings; hashes and queues each hit for archive |
 | 3 | [GoAccess](https://goaccess.io/) | per-IP / path / status / day web statistics (+ its own interactive HTML dashboard) | trends tables and charts |
 | 4 | [Chainsaw](https://github.com/WithSecureLabs/chainsaw) + [Sigma](https://github.com/SigmaHQ/sigma) | community rules over access logs and `auth.log` | converts logs (incl. rotated `.gz`) to JSONL in Sigma field names; per-IP failure-then-success counts |
@@ -253,7 +253,14 @@ correlation passes shrink accordingly (the skipped line counts are recorded).
 * **Detection coverage** is the rule sets' job and is validated with their own material:
   Loki against signature-base's test files, Chainsaw with `chainsaw lint` over the Sigma
   rules plus a hunt on the converted JSONL of a known log, and, best of all, one pass
-  over a reference image you know the ground truth for.
+  over a reference image you know the ground truth for. `docs/TESTING.md` has two:
+  the public OSDFCon 2019 "compromised web server" image (1.1 GB, published answer key,
+  LVM-in-E01 like a real seizure) with a row-by-row scorecard, and `tests/testvm/`, which
+  builds an aaPanel + MariaDB + WordPress VM with planted benign conditions and a
+  generated `GROUND_TRUTH.md`.
+* Every `collect` records the version of each external tool it found
+  (`collected/tool_versions.json`, also in the custody log), so a run can be reproduced
+  with the same builds.
 * Tool command lines follow each tool's documented CLI; `docs/TOOLS.md` lists the exact
   invocation and what to check with `--help` on the box if a flag has moved.
 

@@ -2,7 +2,7 @@
 normally wants to see about each site, read from the files themselves.
 
 Per site under the web roots:
-  * framework detection (WordPress, Laravel, generic PHP, static) and version
+  * framework detection (WordPress, Drupal, Joomla, Laravel, generic PHP, static) and version, nested apps included
   * configuration files located (wp-config.php, .env, config.php ...): database name,
     user, host and table prefix are recorded; passwords and secrets are MASKED
   * WordPress plugins and themes with versions (from their headers / readme Stable tag)
@@ -52,6 +52,26 @@ def detect_framework(site: Path) -> tuple[str, Optional[str]]:
             m = re.search(r"\$wp_version\s*=\s*'([^']+)'", _read(vf, 200))
             ver = m.group(1) if m else None
         return "wordpress", ver
+    if (site / "includes" / "bootstrap.inc").exists() or (site / "core" / "lib" / "Drupal.php").exists():
+        ver = None
+        for vf in (site / "includes" / "bootstrap.inc", site / "core" / "lib" / "Drupal.php"):
+            if vf.exists():
+                m = re.search(r"(?:define\('VERSION',\s*'|const VERSION = ')([^']+)'", _read(vf, 400))
+                if m:
+                    ver = m.group(1)
+                    break
+        return "drupal", ver
+    if (site / "configuration.php").exists() and (site / "administrator").is_dir():
+        ver = None
+        for vf in (site / "libraries" / "src" / "Version.php", site / "libraries" / "cms" / "version" / "version.php",
+                   site / "administrator" / "manifests" / "files" / "joomla.xml"):
+            if vf.exists():
+                txt = _read(vf, 400)
+                m = re.search(r"<version>([^<]+)</version>", txt) or re.search(r"(?:MAJOR_VERSION|RELEASE)\s*=\s*'?([\d.]+)", txt)
+                if m:
+                    ver = m.group(1)
+                    break
+        return "joomla", ver
     if (site / "artisan").exists():
         return "laravel", None
     if (site / "composer.json").exists() or any(site.glob("*.php")):
@@ -61,9 +81,38 @@ def detect_framework(site: Path) -> tuple[str, Optional[str]]:
     return "unknown", None
 
 
+FRAMEWORKS = ("wordpress", "drupal", "joomla", "laravel")
+
+
+def discover_sites(root: Path, max_depth: int = 2) -> list[Path]:
+    """Site directories under a web root: each immediate child, plus any nested directory (to
+    max_depth) that is itself a framework root, e.g. /var/www/html/jabc holding a Drupal install."""
+    out: list[Path] = []
+    for site in sorted(d for d in root.iterdir() if d.is_dir()):
+        out.append(site)
+        if detect_framework(site)[0] in FRAMEWORKS:
+            continue
+        stack = [(site, 1)]
+        while stack:
+            d, depth = stack.pop()
+            if depth > max_depth:
+                continue
+            try:
+                children = sorted(c for c in d.iterdir() if c.is_dir() and not c.name.startswith("."))
+            except OSError:
+                continue
+            for c in children:
+                if detect_framework(c)[0] in FRAMEWORKS:
+                    out.append(c)
+                elif depth < max_depth:
+                    stack.append((c, depth + 1))
+    return out
+
+
 def config_facts(site: Path, case) -> list[dict[str, Any]]:
     out = []
-    for name in ("wp-config.php", ".env", "config.php", "configuration.php", "settings.php", "config/database.php", "db.php", "conn.php"):
+    for name in ("wp-config.php", ".env", "config.php", "configuration.php", "settings.php", "sites/default/settings.php",
+                 "config/database.php", "db.php", "conn.php"):
         p = site / name
         if not p.is_file() or is_binary_file(p):
             continue
@@ -184,7 +233,7 @@ def run(case) -> list[Finding]:
         root = case.abs(wr)
         if not root.is_dir():
             continue
-        for site in sorted(d for d in root.iterdir() if d.is_dir()):
+        for site in discover_sites(root):
             fw, ver = detect_framework(site)
             entry = {"site": case.rel(site), "framework": fw, "version": ver, "configs": config_facts(site, case)}
             if fw == "wordpress":
