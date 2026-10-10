@@ -1,0 +1,18 @@
+# Profile: Linux web host running aaPanel (BT panel) with MariaDB/MySQL — the default.
+# A profile sets evidence paths, which normalizers run, and which tools are on. Everything else
+# (custody, index, citations, archive, export, documents, memory, reports, UI) is profile-independent.
+name: linux-aapanel
+description: Ubuntu/Debian/CentOS server with aaPanel; nginx/Apache sites under /www/wwwroot; MariaDB under /www/server/data
+
+paths:
+  web_roots: [www/wwwroot, var/www]
+  web_logs: [www/wwwlogs, var/log/nginx, var/log/apache2]
+  panel: www/server/panel
+  panel_cron: www/server/cron
+  mariadb_data: [www/server/data, var/lib/mysql]
+  mariadb_plugin: [www/server/mysql/lib/plugin, usr/lib/mysql/plugin]
+  var_log: var/log
+  temp_dirs: [tmp, dev/shm, var/tmp]
+
+normalizers: [uac, documents, loki, goaccess, weblog, auth, chainsaw, aapanel, webapp]
+dbreview: {enabled: true}

@@ -1,0 +1,112 @@
+# Gumshoe configuration. Layering: built-in defaults <- gumshoe/profiles/<profile>.yaml <- this file.
+# Keys here override the profile, so leave `paths:` to the profile unless the layout is unusual.
+
+profile: linux-aapanel      # see `gumshoe profiles`; or `gumshoe --profile linux-generic init ...` per case
+
+mode: mount                 # mount (WSL, read-only mount) | export (FTK Imager export tree on Windows)
+mount:
+  root: /mnt/evidence
+
+# paths:                    # set only to override the profile, e.g. for a custom web root:
+#   web_roots: [srv/sites]
+
+tools:
+  uac:      {enabled: true,  bin: uac,      profile: ir_triage}
+  loki:
+    enabled: true
+    bin: loki
+    extra_args: ["--noprocscan", "--dontwait", "--csv"]
+    # a second, --intense pass (every file regardless of extension) runs only over these upload-type
+    # directories; intense over a whole media tree takes days on a large image
+    intense_globs: ["www/wwwroot/*/wp-content/uploads", "www/wwwroot/*/uploads", "www/wwwroot/*/upload",
+                    "www/wwwroot/*/public/uploads", "www/wwwroot/*/storage", "www/wwwroot/*/files"]
+  goaccess: {enabled: true,  bin: goaccess, log_format: COMBINED}
+  chainsaw: {enabled: true,  bin: chainsaw, sigma_rules: tools/sigma/rules, mappings_dir: rules/chainsaw-mappings}
+  plaso:    {enabled: false, bin: log2timeline.py}
+  clamav:   {enabled: false, bin: clamscan}   # off by default: ~2 GB of signatures in RAM; never alongside a model
+
+llm:
+  base_url: http://127.0.0.1:11434   # from WSL with mirrored networking this reaches Ollama on Windows;
+                                     # otherwise use http://<windows-host-ip>:11434 and set OLLAMA_HOST=0.0.0.0 on Windows
+  models:
+    interactive: qwen2.5:3b-instruct            # questions, filtering
+    report: qwen2.5:7b-instruct-q4_K_M          # report sections and translation (Qwen2.5 reads Russian well)
+    embed: nomic-embed-text                      # optional vectors; for Cyrillic-heavy evidence use bge-m3 (multilingual, ~1.2 GB)
+  num_ctx_interactive: 4096
+  num_ctx_report: 8192
+  num_thread: 8          # P-cores on the i7-12700; try 12 and 20 and keep the fastest
+  temperature: 0.1
+  keep_alive: 30m
+  timeout_s: 900
+  use_embeddings: false
+
+index:
+  chunk_chars: 1500
+  chunk_overlap: 200
+  max_file_bytes: 52428800      # files larger than 50 MB are sampled (head + tail + finding-hit lines)
+  sample_head_bytes: 2097152
+  sample_tail_bytes: 2097152
+
+archive:
+  max_file_bytes: 209715200     # above 200 MB: excerpt + full-file hash instead of a copy
+  excerpt_context_lines: 50
+
+# ---- large images (hundreds of GB) ------------------------------------------------------------
+logs:
+  since: null                   # e.g. "2026-08-01": ignore web/auth log lines before this (narrows a multi-year log)
+  until: null
+  keep_jsonl: true              # false: delete converted web JSONL after Chainsaw (saves ~2x the raw log size)
+  max_post_stems: 500000
+timeline:
+  csv_max_rows: 500000          # full timeline lives in collected/timeline.db; the CSV is a bounded export
+dbreview:
+  max_copy_gb: 20               # datadir larger than this: copy system schema + only the databases below
+  databases: []                 # e.g. [wordpress, shop]
+
+heuristics:                      # examiner-tunable structural checks (not signatures)
+  suspicious_path_prefixes: ["/tmp/", "/dev/shm/", "/var/tmp/", "/run/shm/"]
+  pipe_to_shell_tokens: ["| sh", "|sh", "| bash", "|bash", "| /bin/sh", "| /bin/bash"]
+  ssh_failure_threshold: 20
+  timestomp_gap_seconds: 5
+  burst_window_seconds: 600
+  burst_min_files: 25
+  dump_extensions: [".sql", ".sql.gz", ".zip", ".tar.gz", ".tgz", ".bak", ".7z", ".rar"]
+
+retrieval:
+  top_k: 8
+
+documents:
+  # spreadsheets, Word/ODF, PDF, CSV, Markdown, JSON/XML, SQL dumps, presentations, images:
+  # inventoried, hashed, text-extracted with sheet/row, paragraph and page markers, indexed under the
+  # ORIGINAL path so answers cite the file itself; viewable and downloadable in the UI (Documents tab).
+  # Anything else is reachable on demand: `gumshoe ls`, `gumshoe view --path`, `gumshoe export --paths`.
+  roots: [www/wwwroot, var/www, root, home, www/backup, tmp, var/tmp, dev/shm, opt, srv, mnt, media, var/backups]
+  max_files: 200000
+  max_extract_files: 5000        # interactive default; `gumshoe deep` extracts everything
+  max_extract_bytes: 26214400    # 25 MB per document
+  max_hash_bytes: 536870912
+
+# ---- two speeds -------------------------------------------------------------------------------
+# While you are at the keyboard: ask/UI use llm.models.interactive (3B, 4k ctx) and the caps above.
+# When you walk away: `gumshoe deep --case X` applies these overrides for one unattended run
+# (every tool incl. Plaso + ClamAV, Loki intense everywhere, every document, big index, vectors,
+# translation of all non-Latin findings, 7B narrative) and writes reports/deep-run.log.
+deep:
+  tools: {plaso: {enabled: true}, clamav: {enabled: true}}
+  loki_intense_everywhere: true
+  documents: {max_files: 2000000, max_extract_files: 1000000, max_extract_bytes: 209715200}
+  index: {max_file_bytes: 524288000, sample_head_bytes: 16777216, sample_tail_bytes: 16777216}
+  vectors: true                  # needs an embedding model pulled (bge-m3 recommended for Cyrillic)
+  translate_all: true
+  report_llm: true
+  min_severity_to_archive: medium
+
+text:
+  # Encoding is detected per file (BOM, UTF-8, then cp1251 / koi8_r / cp866 by Cyrillic density, UTF-16);
+  # the FTS5 index uses the unicode61 tokenizer so Cyrillic queries work. Findings carrying non-Latin
+  # text get a script tag; `gumshoe translate --all` adds labelled machine translations.
+  translate_to: en
+
+report:
+  include_llm_narrative: true
+  min_severity_to_archive: high

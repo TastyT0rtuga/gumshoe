@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gumshoe-dfir"
+version = "0.1.0"
+description = "Offline, cited forensic triage for Linux server images: established tools find, a local LLM searches and drafts with mandatory citations"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.10"
+dependencies = ["pyyaml>=6.0"]
+keywords = ["dfir", "digital-forensics", "incident-response", "llm", "rag", "ollama", "aapanel", "chain-of-custody"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Information Technology",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Topic :: Security",
+  "Topic :: System :: Systems Administration",
+]
+
+[project.optional-dependencies]
+ui = ["streamlit>=1.30", "pandas>=2.0"]
+docs = ["openpyxl>=3.1", "pypdf>=4.0"]
+all = ["streamlit>=1.30", "pandas>=2.0", "openpyxl>=3.1", "pypdf>=4.0"]
+
+[project.scripts]
+gumshoe = "gumshoe.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["gumshoe*"]
+
+[tool.setuptools.package-data]
+gumshoe = ["profiles/*.yaml", "rules/chainsaw-mappings/*.yml", "ui/*.py"]

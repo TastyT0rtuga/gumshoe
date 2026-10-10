@@ -1,0 +1,46 @@
+---
+# Chainsaw mapping for Gumshoe's auth JSONL (collected/jsonl/auth/auth.jsonl).
+# Sigma's linux/builtin rules are mostly keyword-based; keywords match on `message`.
+# Validate on the box:
+#   chainsaw hunt cases/<CASE>/collected/jsonl/auth -s tools/sigma/rules/linux --mapping rules/chainsaw-mappings/gumshoe-auth.yml --json
+name: Gumshoe auth.log (syslog) records
+kind: json
+rules: sigma
+
+extensions:
+  preconditions:
+    - for:
+        logsource.product: linux
+      filter:
+        message: "*"
+
+groups:
+  - name: Sigma
+    timestamp: timestamp
+    filter:
+      message: "*"
+    fields:
+      - name: message
+        to: message
+        from: message
+      - name: Message
+        to: message
+        from: Message
+      - name: keywords
+        to: message
+        from: keywords
+      - name: program
+        to: program
+        from: program
+      - name: host
+        to: host
+        from: host
+      - name: pid
+        to: pid
+        from: pid
+      - name: source_file
+        to: source_file
+        from: source_file
+      - name: line
+        to: line
+        from: line

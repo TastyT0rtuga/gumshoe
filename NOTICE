@@ -1,0 +1,24 @@
+Gumshoe
+Copyright the Gumshoe contributors.
+
+This repository contains only Gumshoe's own code, configuration and documentation. It does not
+include or redistribute any third-party tool, rule set or model. The online preparation script
+downloads the following from their publishers; each remains under its own licence:
+
+  UAC (Apache-2.0), Loki (GPL-3.0), signature-base (Detection Rule License 1.1),
+  Chainsaw (GPL-3.0), Sigma rules (Detection Rule License 1.1), GoAccess (MIT),
+  Ollama (MIT), Qwen2.5-7B-Instruct (Apache-2.0), Qwen2.5-3B-Instruct (Qwen Research License —
+  review it for your use, or set llm.models.interactive to another small model such as
+  llama3.2:3b under its own licence), nomic-embed-text and bge-m3 (see their model cards),
+  Arsenal Image Mounter (proprietary, free edition), and the Ubuntu packages installed into the
+  WSL distribution. Licences change between releases; the model cards and repositories are
+  authoritative.
+
+Gumshoe invokes those tools as separate programs.
+
+Development note: portions of this code were drafted with AI assistance and reviewed, tested and
+maintained by the human maintainers.
+
+Disclaimer: this project is not an official product of, and is not endorsed by, any government
+agency or employer of its contributors. It is provided "as is"; examiners remain responsible for
+validating their tools and verifying every finding against the evidence.

@@ -1,0 +1,31 @@
+# case data never goes in the repo
+cases/*
+!cases/.gitkeep
+*.E01
+*.e01
+*.dd
+*.raw
+*.vhdx
+*.vmdk
+
+# bundled third-party tools and models are fetched by setup/, not committed
+tools/
+models/
+wheels/
+gumshoe-transfer/
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+.pytest_cache/
+
+# editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

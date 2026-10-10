@@ -1,0 +1,86 @@
+---
+# Chainsaw mapping for Gumshoe's web-access JSONL (collected/jsonl/web/*.jsonl).
+# Gumshoe already emits Sigma `webserver` field names, so this is near-identity.
+# Validate on the box against the schema shipped in the Chainsaw release's mappings/ folder:
+#   chainsaw hunt cases/<CASE>/collected/jsonl/web -s tools/sigma/rules/web --mapping rules/chainsaw-mappings/gumshoe-web.yml --json
+name: Gumshoe web access logs (Sigma webserver fields)
+kind: json
+rules: sigma
+
+extensions:
+  preconditions:
+    - for:
+        logsource.category: webserver
+      filter:
+        c-uri: "*"
+    - for:
+        logsource.category: proxy
+      filter:
+        c-uri: "*"
+
+groups:
+  - name: Sigma
+    timestamp: timestamp
+    filter:
+      c-uri: "*"
+    fields:
+      - name: c-ip
+        to: c-ip
+        from: c-ip
+      - name: c-uri
+        to: c-uri
+        from: c-uri
+      - name: c-uri-stem
+        to: c-uri-stem
+        from: c-uri-stem
+      - name: cs-uri-stem
+        to: cs-uri-stem
+        from: cs-uri-stem
+      - name: c-uri-query
+        to: c-uri-query
+        from: c-uri-query
+      - name: cs-uri-query
+        to: cs-uri-query
+        from: cs-uri-query
+      - name: c-uri-extension
+        to: c-uri-extension
+        from: c-uri-extension
+      - name: cs-uri-extension
+        to: cs-uri-extension
+        from: cs-uri-extension
+      - name: cs-bytes
+        to: cs-bytes
+        from: cs-bytes
+      - name: cs-user-agent
+        to: cs-user-agent
+        from: cs-user-agent
+      - name: cs-method
+        to: cs-method
+        from: cs-method
+      - name: sc-status
+        to: sc-status
+        from: sc-status
+      - name: sc-bytes
+        to: sc-bytes
+        from: sc-bytes
+      - name: c-useragent
+        to: c-useragent
+        from: c-useragent
+      - name: cs-referer
+        to: cs-referer
+        from: cs-referer
+      - name: cs-host
+        to: site
+        from: cs-host
+      - name: cs-version
+        to: cs-version
+        from: cs-version
+      - name: username
+        to: username
+        from: username
+      - name: source_file
+        to: source_file
+        from: source_file
+      - name: line
+        to: line
+        from: line

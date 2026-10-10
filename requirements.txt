@@ -1,0 +1,14 @@
+# core (CLI, normalizers, index, RAG, reports): stdlib + pyyaml
+pyyaml>=6.0
+
+# browser UI
+streamlit>=1.30
+pandas>=2.0
+
+# documents: spreadsheets and PDFs (stdlib fallbacks exist for xlsx; pdftotext from poppler-utils is preferred for PDF)
+openpyxl>=3.1
+pypdf>=4.0
+
+# optional
+# markdown>=3.5        # nicer HTML reports (a built-in converter is used otherwise)
+# yara-python>=4.3     # only if you want to call YARA from Python directly; Loki brings its own

@@ -1,0 +1,5 @@
+- [ ] `python gumshoe.py selftest` passes
+- [ ] New normalizers return `Finding`s with provenance (`with_provenance`) and never write to the evidence
+- [ ] New tools run through `runners.run_cmd` (logged to custody)
+- [ ] No case data, real indicators, or credentials in code, tests, or samples
+- [ ] Docs updated (README / docs/TOOLS.md / docs/PROFILES.md)

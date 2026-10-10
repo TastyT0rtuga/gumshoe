@@ -1,0 +1,28 @@
+name: selftest
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends poppler-utils
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Compile
+        run: python -m compileall -q gumshoe tests gumshoe.py
+      - name: Self-test (plumbing on a benign synthetic tree; no model needed)
+        run: python gumshoe.py selftest
+      - name: Shell scripts parse
+        run: for f in setup/wsl/*.sh; do bash -n "$f"; done

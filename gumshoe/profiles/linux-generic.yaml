@@ -1,0 +1,17 @@
+# Profile: any Linux server (no control panel). Same tools; the aaPanel reader is skipped;
+# web roots and logs are the distribution defaults. Set paths.web_roots for custom layouts.
+name: linux-generic
+description: Generic Linux server — nginx/Apache under /var/www, logs under /var/log, MySQL/MariaDB under /var/lib/mysql
+
+paths:
+  web_roots: [var/www, srv/www, srv/http, usr/share/nginx/html, opt/www]
+  web_logs: [var/log/nginx, var/log/apache2, var/log/httpd]
+  panel: www/server/panel            # absent on a generic host; harmless
+  panel_cron: www/server/cron
+  mariadb_data: [var/lib/mysql]
+  mariadb_plugin: [usr/lib/mysql/plugin, usr/lib64/mysql/plugin]
+  var_log: var/log
+  temp_dirs: [tmp, dev/shm, var/tmp]
+
+normalizers: [uac, documents, loki, goaccess, weblog, auth, chainsaw, webapp]
+dbreview: {enabled: true}
