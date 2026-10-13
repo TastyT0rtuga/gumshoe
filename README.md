@@ -244,6 +244,14 @@ A multi-year log that dwarfs the incident window is the one thing worth narrowin
 set `logs.since` to a month before the earliest indicator and the conversion, Chainsaw and
 correlation passes shrink accordingly (the skipped line counts are recorded).
 
+## Air-gapped sandbox: the offline bundle
+
+`setup/offline/` turns the repository into a single folder that installs and runs Gumshoe on an air-gapped
+Windows 11 machine with no network at any point: copy it over, double-click `Gumshoe.bat`. It carries
+Ollama and the models, WSL and a pristine Ubuntu rootfs, the full offline package set, the Python wheels and
+every tool. [docs/OFFLINE-BUNDLE.md](docs/OFFLINE-BUNDLE.md) describes the layout, how it was built and
+how it is verified on the sandbox.
+
 ## Validation
 
 * `gumshoe selftest` is a **plumbing test** on a benign synthetic tree: custody chain

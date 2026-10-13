@@ -1,0 +1,46 @@
+GUMSHOE - OFFLINE BUNDLE FOR THE AIR-GAPPED SANDBOX
+====================================================
+
+Everything Gumshoe needs is in this folder. Nothing here uses the network.
+
+  1. Copy the whole Gumshoe-offline folder onto the sandbox (any drive, e.g. C:\Gumshoe-offline).
+     - the path must not contain spaces
+     - the drive must be exFAT or NTFS (one model file is 4.7 GB; FAT32 cannot hold it)
+     - you need about 12 GB for the folder plus 12 GB for the installation (C:\DFIR and the model store)
+
+  2. Double-click  Gumshoe.bat
+     The first run installs everything (10-20 minutes). Windows asks for administrator approval once.
+     If it says REBOOT NEEDED (only when WSL was not on the machine yet): reboot, then double-click
+     Gumshoe.bat again and it continues where it stopped.
+
+  3. From then on, Gumshoe.bat starts the model server and opens http://localhost:8501 in your browser.
+     Keep the minimized "wsl" window open while you work; close it to stop.
+
+  Gumshoe-Selftest.bat  re-runs all the checks any time (tools, models, no-network, self-test).
+
+WHAT GETS INSTALLED
+  - Ollama (local model server) + models: qwen2.5:3b-instruct (interactive), qwen2.5:7b-instruct-q4_K_M
+    (reports, translation), nomic-embed-text and bge-m3 (vectors; bge-m3 for Cyrillic-heavy evidence)
+  - WSL 2 + an Ubuntu 24.04 "DFIR" distro with: UAC, Loki + signature-base, Chainsaw + Sigma rules,
+    GoAccess, The Sleuth Kit, ewf-tools (E01 mounting), LVM/mdadm/kpartx/qemu-utils/ntfs-3g (image
+    mounting), MariaDB (read-only database review), poppler/catdoc/antiword (document text), Python 3.12
+  - Gumshoe itself at /opt/dfir/gumshoe inside the distro, cases under /opt/dfir/cases
+
+WHERE THINGS ARE
+  C:\DFIR\first-run.log            what the installer did
+  C:\DFIR\.installed               marker; delete it to force a full reinstall from this folder
+  C:\DFIR\wsl\DFIR                 the distro's virtual disk
+  %USERPROFILE%\.ollama\models     the model store (copied from models\ in this folder)
+
+USING IT (short version; docs\RUNBOOK.md in the gumshoe folder has the full dummy-proof walkthrough)
+  - put the evidence image somewhere the distro can read it (e.g. C:\DFIR\evidence\server.E01)
+  - mount it read-only:   wsl -d DFIR -u root -- mount_image /mnt/c/DFIR/evidence/server.E01
+  - in the UI: New case -> point it at the mount -> Run tools -> Ask / Report
+  - or at the prompt:     wsl -d DFIR -u root   then   gumshoe --help
+
+OPTIONAL (not included, registration required): Arsenal Image Mounter from arsenalrecon.com if you prefer
+mounting images on the Windows side. The bundled mount_image script covers E01/raw/VHDX/VMDK/LVM in WSL.
+
+INTEGRITY
+  SHA256SUMS.txt lists every file except the model files, whose names ARE their SHA-256. The first run
+  checks all of it (and the installers' Authenticode signatures) before installing anything.

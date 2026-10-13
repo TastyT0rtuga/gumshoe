@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Offline bundle for air-gapped sandboxes (`setup/offline/`): `Gumshoe.bat` first-run installer and launcher, `wsl_provision.sh` (local apt repository + wheels, validated against a pristine Ubuntu 24.04 rootfs), `docs/OFFLINE-BUNDLE.md`.
 - Shell-history review for every account (root, users, service accounts with a home): inventory
   plus per-line findings for account changes, log handling, compiling, history suppression and the
   existing suspicious-command heuristics, each with path and line number.
