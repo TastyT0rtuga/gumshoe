@@ -83,8 +83,9 @@ def run_tools(case, tools: Optional[list[str]] = None, skip: Optional[list[str]]
     return results
 
 
-def normalize_all(case, only: Optional[list[str]] = None, log=print) -> list[dict[str, Any]]:
-    findings: list[Finding] = []
+def normalize_all(case, only: Optional[list[str]] = None, log=print, extra: Optional[list[Finding]] = None) -> list[dict[str, Any]]:
+    """Run the normalizers (plus any `extra` findings, e.g. from the MariaDB review), correlate, write findings + summary."""
+    findings: list[Finding] = list(extra or [])
     per_source: dict[str, int] = {}
     for name, fn in active_normalizers(case.cfg):
         if only and name not in only:
@@ -114,14 +115,20 @@ def normalize_all(case, only: Optional[list[str]] = None, log=print) -> list[dic
     findings.sort(key=lambda f: (-sev_rank(f.severity), f.source, f.title))
     dicts = [f.to_dict() for f in findings]
     case.write_findings(dicts)
+    write_summary(case, dicts, per_source)
+    return dicts
+
+
+def write_summary(case, dicts: list[dict[str, Any]], per_source: Optional[dict[str, int]] = None) -> dict[str, Any]:
+    """summary.json from a findings list (also used after `gumshoe dbreview` appends findings)."""
     summary = {
         "generated": utc_now(),
-        "total": len(findings),
-        "by_severity": dict(Counter(f.severity for f in findings)),
-        "by_source": dict(Counter(f.source for f in findings)),
-        "by_rule": dict(Counter(f.rule or "-" for f in findings)),
-        "normalizers": per_source,
+        "total": len(dicts),
+        "by_severity": dict(Counter(f.get("severity") for f in dicts)),
+        "by_source": dict(Counter(f.get("source") for f in dicts)),
+        "by_rule": dict(Counter(f.get("rule") or "-" for f in dicts)),
+        "normalizers": per_source or {},
     }
     case.write_json("summary.json", summary)
     case.custody.append("normalized", {k: v for k, v in summary.items() if k != "by_rule"})
-    return dicts
+    return summary

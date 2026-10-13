@@ -73,11 +73,23 @@ def cmd_collect(args):
         tools = args.tools.split(",") if args.tools else None
         skip = args.skip.split(",") if args.skip else None
         run_tools(c, tools=tools, skip=skip)
+    extra = []
     if args.db:
         from .dbreview import review
-        fs = review(c)
-        print(f"[dbreview] {len(fs)} finding(s)")
-    findings = normalize_all(c)
+        from .normalize.base import Finding
+        try:
+            extra = review(c)
+            print(f"[dbreview] {len(extra)} finding(s)")
+        except Exception as e:  # one tool must not sink the run: record it and carry on with the rest
+            import traceback
+            (c.dir / "logs").mkdir(exist_ok=True)
+            (c.dir / "logs" / "dbreview-error.log").write_text(traceback.format_exc(), "utf-8")
+            print(f"[dbreview] FAILED: {type(e).__name__}: {e}  (details: logs/dbreview-error.log; continuing)")
+            c.custody.append("db_review_error", {"error": f"{type(e).__name__}: {e}"[:500]})
+            extra = [Finding(source="dbreview", severity="info", rule="db.review_error",
+                             title=f"MariaDB review failed: {type(e).__name__}",
+                             description=f"{e}"[:800] + " - see logs/dbreview-error.log; re-run with `gumshoe dbreview` after fixing.")]
+    findings = normalize_all(c, extra=extra)
     s = c.read_json("summary.json", {})
     print(json.dumps({"total": s.get("total"), "by_severity": s.get("by_severity"), "by_source": s.get("by_source")}, indent=2))
 
@@ -92,10 +104,13 @@ def cmd_normalize(args):
 def cmd_dbreview(args):
     from .dbreview import review
     c = _case(args)
+    from .collect import write_summary
     fs = review(c)
-    existing = c.read_findings()
-    c.write_findings(existing + [f.to_dict() for f in fs])
-    print(f"[dbreview] {len(fs)} finding(s) appended; re-run `gumshoe index`")
+    existing = [f for f in c.read_findings() if f.get("source") != "dbreview"]   # replace an earlier review
+    dicts = existing + [f.to_dict() for f in fs]
+    c.write_findings(dicts)
+    write_summary(c, dicts)
+    print(f"[dbreview] {len(fs)} finding(s) merged; re-run `gumshoe index`")
 
 
 def cmd_index(args):

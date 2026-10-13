@@ -21,6 +21,8 @@ STEPS = {
                 lambda c: ["collect", "--db"]),
     "deep":    ("Deep (walk-away)", "every tool, every document, vectors, translations, 7B report (overnight)",
                 lambda c: ["deep"]),
+    "reanalyze": ("Re-analyze", "redo the database review and the analysis of what Collect already gathered, without re-running the tools (minutes)",
+                lambda c: ["collect", "--normalize-only", "--db"]),
 }
 
 
