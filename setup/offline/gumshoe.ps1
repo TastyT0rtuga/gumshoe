@@ -34,6 +34,11 @@ Write-Step "WSL distro $WslName"
 if (-not (Test-WslDistro $WslName)) { Write-Host "distro $WslName is missing; delete $installed and double-click Gumshoe.bat to reinstall" -ForegroundColor Red; exit 1 }
 & wsl.exe -d $WslName -u root -- test -f /opt/dfir/.provisioned
 if ($LASTEXITCODE -ne 0) { Write-Host "distro is not provisioned; delete $installed and double-click Gumshoe.bat to reinstall" -ForegroundColor Red; exit 1 }
+# keep the distro's copy of Gumshoe current with the bundle (so updating = replacing the folder); the
+# distro keeps its own cases, unpacked tools and config.yaml
+$bwsl = ConvertTo-WslPath $WslName $Bundle
+& wsl.exe -d $WslName -u root -- rsync -a --delete --exclude cases --exclude tools --exclude config.yaml --exclude __pycache__ --exclude .git "$bwsl/gumshoe/" /opt/dfir/gumshoe/
+if ($LASTEXITCODE -eq 0) { Write-Ok "project in the distro matches the bundle" } else { Write-Warn2 "could not sync the project from the bundle (rsync $LASTEXITCODE)" }
 # can the distro reach Ollama? mirrored networking -> 127.0.0.1; NAT -> the Windows host address
 [void](Ensure-OllamaFromWsl $WslName $OllamaPort)
 
@@ -46,8 +51,18 @@ if ($Selftest) {
 Write-Step "Gumshoe UI"
 if (Test-Port $Port) { Write-Ok "UI already running on $Port" }
 else {
+  # a UI left over from an earlier start that Windows cannot reach (wrong bind address) is restarted
+  & wsl.exe -d $WslName -u root -- curl -s -m 2 -o /dev/null "http://127.0.0.1:$Port/"
+  if ($LASTEXITCODE -eq 0) {
+    Write-Warn2 "a UI is listening inside the distro but Windows cannot reach it; restarting it"
+    & wsl.exe -d $WslName -u root -- pkill -f "streamlit run" 2>$null; Start-Sleep 2
+  }
   Start-Process -FilePath "wsl.exe" -ArgumentList @("-d", $WslName, "-u", "root", "--", "gumshoe", "ui", "--cases-root", "/opt/dfir/cases", "--port", "$Port") -WindowStyle Minimized
-  if (-not (Wait-Port $Port 90 "the UI")) { Write-Host "the UI did not come up on port $Port; run Gumshoe-Selftest.bat" -ForegroundColor Red; exit 1 }
+  if (-not (Wait-Port $Port 120 "the UI")) {
+    Write-Host "the UI did not come up on port $Port. The minimized wsl window shows why; Gumshoe-Selftest.bat checks the rest." -ForegroundColor Red
+    Write-Host "(If that window says it is listening, Windows cannot reach the distro's port: run  wsl --shutdown  and double-click Gumshoe.bat again.)"
+    exit 1
+  }
   Write-Ok "UI listening on $Port"
 }
 Start-Process "http://localhost:$Port"

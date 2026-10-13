@@ -107,6 +107,17 @@ if (Get-NetFirewallRule -DisplayName "Gumshoe Ollama (WSL)" -ErrorAction Silentl
 } else {
   New-NetFirewallRule -DisplayName "Gumshoe Ollama (WSL)" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 11434, 11435 -Profile Any | Out-Null
 }
+# mirrored networking routes Windows -> distro traffic through the Hyper-V firewall; allow the UI and Ollama
+# ports for the WSL VM (cmdlets exist on Windows 11 22H2+; older builds use NAT mode and skip this)
+try {
+  $wslVm = '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}'
+  if (Get-Command New-NetFirewallHyperVRule -ErrorAction SilentlyContinue) {
+    if (-not (Get-NetFirewallHyperVRule -Name "Gumshoe-WSL" -ErrorAction SilentlyContinue)) {
+      New-NetFirewallHyperVRule -Name "Gumshoe-WSL" -DisplayName "Gumshoe (WSL UI and Ollama)" -Direction Inbound -VMCreatorId $wslVm -Protocol TCP -LocalPorts 8501, 11434, 11435 -ErrorAction Stop | Out-Null
+    }
+    Write-Ok "Hyper-V firewall rule for the WSL VM (ports 8501, 11434, 11435)"
+  }
+} catch { Write-Warn2 "could not add the Hyper-V firewall rule: $($_.Exception.Message)" }
 $OllamaPort = Start-OllamaForGumshoe $Bundle
 if ($OllamaPort -eq 0) { Fail "no Ollama with the bundled models could be started" }
 else { Write-Ok ("models visible on port ${OllamaPort}: " + ((Get-OllamaModels $OllamaPort) -join ", ")) }

@@ -311,8 +311,11 @@ def cmd_status(args):
 def cmd_ui(args):
     import subprocess
     app = package_dir() / "ui" / "app.py"
+    # 0.0.0.0, not the default IPv6 wildcard: under WSL only an IPv4 listener is reachable from Windows
+    # (NAT localhost forwarding and mirrored networking both speak 127.0.0.1 only)
     cmd = [sys.executable, "-m", "streamlit", "run", str(app), "--server.headless", "true", "--browser.gatherUsageStats", "false",
-           "--server.port", str(args.port), "--", "--cases-root", str(Path(args.cases_root).resolve()), "--config", str(args.config or "")]
+           "--server.port", str(args.port), "--server.address", getattr(args, "address", None) or "0.0.0.0",
+           "--", "--cases-root", str(Path(args.cases_root).resolve()), "--config", str(args.config or "")]
     subprocess.call(cmd)
 
 
@@ -416,6 +419,7 @@ def main(argv=None):
 
     s = sub.add_parser("status", help="case status"); s.set_defaults(fn=cmd_status)
     s = sub.add_parser("ui", help="launch the browser UI"); s.set_defaults(fn=cmd_ui); s.add_argument("--port", type=int, default=8501)
+    s.add_argument("--address", default=None, help="bind address (default 0.0.0.0; use 127.0.0.1 on a native Linux box to keep it local)")
     s = sub.add_parser("selftest", help="run the bundled self-test"); s.set_defaults(fn=cmd_selftest)
     s = sub.add_parser("mount-help", help="print mount instructions"); s.set_defaults(fn=cmd_mount_help)
     s = sub.add_parser("profiles", help="list evidence profiles"); s.set_defaults(fn=cmd_profiles)

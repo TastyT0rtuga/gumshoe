@@ -28,9 +28,15 @@ $RequiredModels = @("qwen2.5:3b-instruct", "qwen2.5:7b-instruct-q4_K_M", "nomic-
 function Get-OllamaModels([int]$Port = 11434) {
   try { $j = Invoke-RestMethod "http://127.0.0.1:$Port/api/tags" -TimeoutSec 5; return @($j.models | ForEach-Object { $_.name }) } catch { return @() }
 }
-function Get-MissingModels([int]$Port = 11434) {
-  $have = Get-OllamaModels $Port
-  return @($RequiredModels | Where-Object { $have -notcontains $_ })
+function Get-MissingModels([int]$Port = 11434, [int]$RetrySeconds = 0) {
+  # a freshly started Ollama answers /api/tags before it has finished scanning its store: retry briefly
+  $deadline = (Get-Date).AddSeconds($RetrySeconds)
+  do {
+    $have = Get-OllamaModels $Port
+    $missing = @($RequiredModels | Where-Object { $have -notcontains $_ })
+    if ($missing.Count -eq 0 -or (Get-Date) -ge $deadline) { return $missing }
+    Start-Sleep 1
+  } while ($true)
 }
 # Where this machine's Ollama keeps models: OLLAMA_MODELS if set anywhere, else the default store.
 function Get-OllamaModelsDir {
@@ -65,7 +71,7 @@ function Start-OllamaForGumshoe([string]$Bundle) {
     if ($missing.Count -eq 0) { Write-Ok "Ollama on 11434 has all bundled models"; return 11434 }
     $store = Get-OllamaModelsDir
     Write-Host "  the Ollama on 11434 lacks $($missing -join ', '); copying the bundled models into $store ..."
-    if ($Bundle -and (Test-Path (Join-Path $Bundle "models")) -and (Copy-ModelStore $Bundle $store)) { $missing = Get-MissingModels 11434 }
+    if ($Bundle -and (Test-Path (Join-Path $Bundle "models")) -and (Copy-ModelStore $Bundle $store)) { $missing = Get-MissingModels 11434 5 }
     if ($missing.Count -eq 0) { Write-Ok "Ollama on 11434 now has all bundled models"; return 11434 }
     Write-Warn2 "the Ollama on 11434 still cannot see them (it may run elsewhere, e.g. in Docker). Using Gumshoe's own Ollama on 11435."
     $port = 11435
@@ -75,7 +81,7 @@ function Start-OllamaForGumshoe([string]$Bundle) {
     }
   } else { $port = 11434 }
   if (-not (Start-OllamaServe $port)) { return 0 }
-  $missing = Get-MissingModels $port
+  $missing = Get-MissingModels $port 20
   if ($missing.Count -gt 0) { Write-Warn2 "started on $port but these models are missing: $($missing -join ', ')" }
   return $port
 }
