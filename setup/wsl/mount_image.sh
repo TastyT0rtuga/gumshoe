@@ -1,87 +1,172 @@
 #!/usr/bin/env bash
-# Mount a forensic image read-only inside WSL (or any Linux): E01 (via ewfmount), raw/dd, or VHDX
-# (via qemu-nbd), with partition and LVM handling. Prints the exact mount and the command to undo it.
+# Mount a forensic image read-only inside WSL (or any Linux): E01 (via ewfmount), raw/dd/img, or
+# VHDX/VMDK/qcow2 (via qemu-nbd), with partition and LVM handling. Prints what it picked and how to undo it.
 # Gumshoe itself never mounts anything; this is the examiner's explicit step, logged by `gumshoe verify`.
 #
-#   sudo setup/wsl/mount_image.sh /mnt/d/case/Webserver.E01            # mounts at /mnt/evidence
-#   sudo setup/wsl/mount_image.sh --umount                             # undo
-#   sudo setup/wsl/mount_image.sh image.E01 --part 6                   # choose a partition explicitly
-#   sudo setup/wsl/mount_image.sh image.E01 --lv VulnOSv2-vg/root      # choose a logical volume explicitly
-set -euo pipefail
+#   mount_image /mnt/d/case/Webserver.E01              # mounts the root filesystem at /mnt/evidence
+#   mount_image image.raw --part 2                      # choose a partition explicitly
+#   mount_image image.raw --lv VulnOSv2-vg/root         # choose a logical volume explicitly
+#   mount_image --umount                                # undo everything
+#
+# Read-only at every layer: the loop device is read-only, LVM is told to activate the volume group
+# read-only (and only to look at the image's own devices), and the filesystem is mounted
+# ro,noload/norecovery so no journal replay touches the image.
+# Works without udev (WSL has none): LVM is run with udev_rules/udev_sync off and the device nodes are
+# created by vgmknodes/dmsetup instead.
+set -uo pipefail
 TARGET=/mnt/evidence; EWF=/mnt/ewf; PART=""; LV=""; IMG=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --umount) IMG=UMOUNT;; --target) TARGET="$2"; shift;; --part) PART="$2"; shift;; --lv) LV="$2"; shift;;
+    -h|--help) sed -n 2,13p "$0"; exit 0;;
     *) IMG="$1";;
   esac; shift
 done
-[ "$(id -u)" -eq 0 ] || { echo "run with sudo"; exit 1; }
+[ "$(id -u)" -eq 0 ] || { echo "run as root (sudo)"; exit 1; }
 STATE=/run/gumshoe-mount.state
+die(){ echo "ERROR: $*"; exit "${2:-1}"; }
+
+# LVM: no udev needed, scan only our loop/nbd devices (never the examiner's disks), activate read-only
+lvm_cfg(){
+  local ro=""; [ -n "${1:-}" ] && ro="read_only_volume_list=[\"$1\"]"
+  echo "devices{obtain_device_list_from_udev=0 use_devicesfile=0 filter=[\"a|^/dev/loop[0-9]+p?[0-9]*\$|\",\"a|^/dev/mapper/loop[0-9]+p[0-9]+\$|\",\"a|^/dev/nbd[0-9]+p?[0-9]*\$|\",\"r|.*|\"]} activation{udev_sync=0 udev_rules=0 verify_udev_operations=0 $ro} global{use_lvmlockd=0} log{silent=0}"
+}
+lvmc(){ lvm "$@" --config "$(lvm_cfg "${VG:-}")"; }
 
 if [ "$IMG" = "UMOUNT" ]; then
-  [ -f "$STATE" ] || { echo "nothing recorded in $STATE"; exit 1; }
-  # shellcheck disable=SC1090
-  . "$STATE"
+  if [ -f "$STATE" ]; then
+    # shellcheck disable=SC1090
+    . "$STATE"
+  else
+    echo "no mount recorded in $STATE; cleaning up whatever an earlier attempt left behind"
+  fi
   umount "$TARGET" 2>/dev/null && echo "unmounted $TARGET"
-  [ -n "${VG:-}" ] && vgchange -an "$VG" >/dev/null 2>&1 && echo "deactivated VG $VG"
-  [ -n "${LOOPDEV:-}" ] && kpartx -d "$LOOPDEV" >/dev/null 2>&1 && losetup -d "$LOOPDEV" 2>/dev/null && echo "released $LOOPDEV"
-  [ -n "${NBD:-}" ] && qemu-nbd --disconnect "$NBD" >/dev/null 2>&1 && echo "disconnected $NBD"
+  # every VG that lives on our loop/nbd devices (the filter keeps the examiner's own disks out of it)
+  for vg in ${VG:-} $(lvm vgs --noheadings -o vg_name --config "$(lvm_cfg)" 2>/dev/null); do
+    VG="$vg"; lvmc vgchange -an "$vg" >/dev/null 2>&1 && echo "deactivated VG $vg"
+  done
+  for l in ${LOOPDEV:-} $(losetup -ln 2>/dev/null | awk '{print $1}'); do
+    [ -e "$l" ] || continue
+    kpartx -d "$l" >/dev/null 2>&1
+    losetup -d "$l" 2>/dev/null && echo "released $l"
+  done
+  for n in ${NBD:-} /dev/nbd0; do [ -e "$n" ] && qemu-nbd --disconnect "$n" >/dev/null 2>&1 && echo "disconnected $n"; done
   mountpoint -q "$EWF" && fusermount -u "$EWF" 2>/dev/null && echo "unmounted $EWF"
   rm -f "$STATE"; exit 0
 fi
-[ -n "$IMG" ] && [ -f "$IMG" ] || { echo "usage: $0 <image.E01|image.dd|image.vhdx> [--part N] [--lv VG/LV] [--target DIR] | --umount"; exit 1; }
+[ -n "$IMG" ] && [ -f "$IMG" ] || { echo "usage: $0 <image.E01|image.raw|image.dd|image.vhdx> [--part N] [--lv VG/LV] [--target DIR] | --umount"; exit 1; }
+[ -f "$STATE" ] && die "something is already mounted by this script (see $STATE); run: $0 --umount   (or press Unmount in the UI)"
 mkdir -p "$TARGET" "$EWF"
-LOOPDEV=""; NBD=""; VG=""; RAW=""
+mountpoint -q "$TARGET" && die "$TARGET is already a mount point; unmount it first"
+LOOPDEV=""; NBD=""; VG=""; RAW=""; PARTS="none"
 
 case "${IMG,,}" in
-  *.e01)
-    command -v ewfmount >/dev/null || { echo "ewfmount missing: apt install ewf-tools"; exit 1; }
-    echo "== ewfinfo (acquisition hashes; compare with gumshoe verify / case paperwork)"; ewfinfo "$IMG" | grep -iE "MD5|SHA|Acquisition date|Examiner|Case" || true
-    mountpoint -q "$EWF" || ewfmount "$IMG" "$EWF"
+  *.e01|*.ex01)
+    command -v ewfmount >/dev/null || die "ewfmount missing (apt install ewf-tools)"
+    echo "== ewfinfo (acquisition hashes; compare with gumshoe verify / case paperwork)"
+    ewfinfo "$IMG" 2>/dev/null | grep -iE "MD5|SHA|Acquisition date|Examiner|Case|Evidence" || true
+    mountpoint -q "$EWF" || ewfmount "$IMG" "$EWF" || die "ewfmount failed"
     RAW="$EWF/ewf1";;
   *.vhdx|*.vhd|*.vmdk|*.qcow2)
-    command -v qemu-nbd >/dev/null || { echo "qemu-nbd missing: apt install qemu-utils"; exit 1; }
-    modprobe nbd max_part=16; NBD=/dev/nbd0
-    qemu-nbd --read-only --connect="$NBD" "$IMG"; sleep 1; RAW="$NBD";;
+    command -v qemu-nbd >/dev/null || die "qemu-nbd missing (apt install qemu-utils)"
+    modprobe nbd max_part=16 2>/dev/null || true
+    [ -e /dev/nbd0 ] || die "no /dev/nbd0: this kernel has no nbd module (WSL: use wsl --mount --vhd on the Windows side, or convert to raw with qemu-img)"
+    NBD=/dev/nbd0
+    qemu-nbd --read-only --connect="$NBD" "$IMG" || die "qemu-nbd failed"
+    sleep 1; RAW="$NBD";;
   *) RAW="$IMG";;
 esac
 
-echo "== partitions"; mmls "$RAW" 2>/dev/null || fdisk -l "$RAW" 2>/dev/null || true
+echo "== partitions"
+mmls "$RAW" 2>/dev/null || fdisk -l "$RAW" 2>/dev/null || echo "(no partition table: treating the image as one filesystem or one PV)"
+
 if [ -z "$NBD" ]; then
-  LOOPDEV=$(losetup --find --show --read-only "$RAW")
-  kpartx -av "$LOOPDEV" >/dev/null 2>&1 || true
-fi
-sleep 1
-DEV=""
-if [ -n "$LV" ]; then
-  VG="${LV%%/*}"; vgchange -ay "$VG" >/dev/null; DEV="/dev/$LV"
-elif [ -n "$PART" ]; then
-  if [ -n "$NBD" ]; then DEV="${NBD}p${PART}"; else DEV="/dev/mapper/$(basename "$LOOPDEV")p${PART}"; fi
-else
-  # prefer an LVM root LV; else the largest ext4/xfs partition
-  if pvs --noheadings 2>/dev/null | grep -qE "$(basename "${LOOPDEV:-$NBD}")"; then
-    VG=$(pvs --noheadings -o vg_name 2>/dev/null | grep -v '^\s*$' | head -1 | tr -d ' ')
-    vgchange -ay "$VG" >/dev/null
-    DEV=$(lvs --noheadings -o lv_path "$VG" 2>/dev/null | tr -d ' ' | grep -iE "root" | head -1)
-    [ -z "$DEV" ] && DEV=$(lvs --noheadings -o lv_path,lv_size --units b "$VG" | sort -k2 -n | tail -1 | awk '{print $1}')
-  else
-    DEV=$(lsblk -nrpo NAME,FSTYPE,SIZE -b "${LOOPDEV:-$NBD}" 2>/dev/null | awk '$2=="ext4"||$2=="xfs"{print $3, $1}' | sort -n | tail -1 | awk '{print $2}')
-    [ -z "$DEV" ] && DEV=$(ls /dev/mapper/$(basename "${LOOPDEV:-x}")p* 2>/dev/null | head -1)
+  # 1st choice: the kernel scans the partitions (no device-mapper, no udev needed); fallback: kpartx maps
+  LOOPDEV=$(losetup --find --show --read-only -P "$RAW" 2>/dev/null) || LOOPDEV=$(losetup --find --show --read-only "$RAW") || die "losetup failed"
+  for _ in 1 2 3 4 5; do ls "${LOOPDEV}"p* >/dev/null 2>&1 && break; sleep 0.5; done
+  if ls "${LOOPDEV}"p* >/dev/null 2>&1; then PARTS="kernel"
+  elif command -v kpartx >/dev/null && kpartx -av "$LOOPDEV" >/dev/null 2>&1 && ls /dev/mapper/"$(basename "$LOOPDEV")"p* >/dev/null 2>&1; then PARTS="kpartx"
   fi
 fi
-[ -n "$DEV" ] && [ -e "$DEV" ] || { echo "could not pick a filesystem; use --part N or --lv VG/LV (see the listing above)"; exit 1; }
+BASE="${LOOPDEV:-$NBD}"
+part_dev(){  # partition N -> device node
+  if [ -n "$NBD" ]; then echo "${NBD}p$1"
+  elif [ "$PARTS" = "kpartx" ]; then echo "/dev/mapper/$(basename "$LOOPDEV")p$1"
+  else echo "${LOOPDEV}p$1"; fi
+}
+list_parts(){ ls "${BASE}"p* /dev/mapper/"$(basename "$BASE")"p* 2>/dev/null || true; }
+echo "== block devices"; lsblk -o NAME,SIZE,FSTYPE,TYPE,RO "$BASE" 2>/dev/null || true
+
+save_state(){ printf 'TARGET=%s\nEWF=%s\nLOOPDEV=%s\nNBD=%s\nVG=%s\nPARTS=%s\n' "$TARGET" "$EWF" "$LOOPDEV" "$NBD" "$VG" "$PARTS" > "$STATE"; }
+cleanup_fail(){ save_state; echo "   (devices left attached so you can inspect them; undo with: $0 --umount)"; }
+
+activate_vg(){  # $1 = VG; sets nothing, exits non-zero on failure with the real LVM message shown
+  local vg="$1" out
+  VG="$vg"
+  if out=$(lvmc vgchange -ay "$vg" 2>&1); then echo "$out" | sed 's/^/   /'
+  else
+    echo "$out" | sed 's/^/   lvm: /'
+    if echo "$out" | grep -qiE "partial|missing"; then
+      echo "   VG is partial (a PV is missing from the image); activating what is there, read-only"
+      out=$(lvmc vgchange -ay --activationmode partial "$vg" 2>&1) && echo "$out" | sed 's/^/   /' || { echo "$out" | sed 's/^/   lvm: /'; return 5; }
+    else return 5; fi
+  fi
+  # device nodes without udev
+  lvmc vgmknodes "$vg" >/dev/null 2>&1 || true
+  dmsetup mknodes >/dev/null 2>&1 || true
+  return 0
+}
+lv_dev(){  # VG/LV -> an existing device node (symlink, dm name, or /dev/dm-N)
+  local vglv="$1" vg lv d
+  vg="${vglv%%/*}"; lv="${vglv#*/}"
+  for d in "/dev/$vg/$lv" "/dev/mapper/${vg//-/--}-${lv//-/--}"; do [ -e "$d" ] && { echo "$d"; return; }; done
+  d=$(dmsetup info -c --noheadings -o major,minor "${vg//-/--}-${lv//-/--}" 2>/dev/null | tr -d ' ')
+  [ -n "$d" ] && [ -e "/dev/block/$d" ] && { echo "/dev/block/$d"; return; }
+  echo ""
+}
+
+DEV=""
+if [ -n "$LV" ]; then
+  activate_vg "${LV%%/*}" || { cleanup_fail; die "LVM activation failed (see the lvm: lines above)" 5; }
+  DEV=$(lv_dev "$LV"); [ -n "$DEV" ] || { cleanup_fail; die "logical volume $LV not found after activation (lvs: $(lvmc lvs --noheadings -o lv_path "${LV%%/*}" 2>&1 | tr -s ' \n' ' '))"; }
+elif [ -n "$PART" ]; then
+  DEV=$(part_dev "$PART"); [ -e "$DEV" ] || { cleanup_fail; die "partition $PART ($DEV) does not exist; partitions seen: $(list_parts | tr '\n' ' ')"; }
+else
+  # an LVM PV on any of our devices? prefer its root LV; otherwise the largest ext4/xfs/btrfs partition
+  PVOUT=$(lvm pvs --noheadings -o pv_name,vg_name --config "$(lvm_cfg)" 2>/dev/null | awk '$1 ~ /loop|nbd/' || true)
+  if [ -n "$PVOUT" ]; then
+    echo "== LVM physical volumes in the image"; echo "$PVOUT" | sed 's/^/   /'
+    VGNAME=$(echo "$PVOUT" | awk '$2!=""{print $2; exit}')
+    [ -n "$VGNAME" ] || { cleanup_fail; die "a PV was found but it belongs to no readable volume group (orphan PV or damaged metadata); try --part N for a plain partition" 5; }
+    activate_vg "$VGNAME" || { cleanup_fail; die "LVM activation failed (see the lvm: lines above)" 5; }
+    echo "== logical volumes"
+    LVLIST=$(lvmc lvs --noheadings -o lv_path,lv_size,lv_attr --units b "$VGNAME" 2>/dev/null | awk '{print $1, $2, $3}')
+    echo "$LVLIST" | sed 's/^/   /'
+    # root-looking names first, then the largest LV carrying a filesystem (not swap)
+    for cand in $(echo "$LVLIST" | awk '{print $1}' | grep -iE '/(root|rootfs|lv_root|ubuntu-lv|system|sys|centos-root|rhel-root)$'; echo "$LVLIST" | sort -k2 -n -r | awk '{print $1}'); do
+      d=$(lv_dev "${cand#/dev/}"); [ -n "$d" ] || continue
+      t=$(blkid -o value -s TYPE "$d" 2>/dev/null || true)
+      case "$t" in ext2|ext3|ext4|xfs|btrfs) DEV="$d"; break;; esac
+    done
+    [ -n "$DEV" ] || { cleanup_fail; die "no logical volume with a mountable filesystem; use --lv VG/LV (nodes: $(ls /dev/mapper 2>/dev/null | tr '\n' ' '))"; }
+  else
+    best=0
+    for d in $(list_parts) "$BASE"; do
+      [ -e "$d" ] || continue
+      t=$(blkid -o value -s TYPE "$d" 2>/dev/null || true)
+      case "$t" in ext2|ext3|ext4|xfs|btrfs) sz=$(blockdev --getsize64 "$d" 2>/dev/null || echo 0); [ "$sz" -gt "$best" ] && { best=$sz; DEV="$d"; };; esac
+    done
+    [ -n "$DEV" ] || { cleanup_fail; die "no ext/xfs/btrfs filesystem found on $(list_parts "$BASE" | tr '\n' ' ') $BASE; use --part N (listing above) or --lv VG/LV"; }
+  fi
+fi
 FST=$(blkid -o value -s TYPE "$DEV" 2>/dev/null || echo "")
 OPTS="ro,noatime,noexec,nosuid"
 case "$FST" in ext4|ext3) OPTS="$OPTS,noload";; xfs) OPTS="$OPTS,norecovery";; esac
-mount -t "${FST:-auto}" -o "$OPTS" "$DEV" "$TARGET"
-cat > "$STATE" <<EOF
-TARGET=$TARGET
-EWF=$EWF
-LOOPDEV=$LOOPDEV
-NBD=$NBD
-VG=$VG
-EOF
+if ! out=$(mount -t "${FST:-auto}" -o "$OPTS" "$DEV" "$TARGET" 2>&1); then
+  echo "$out"; cleanup_fail; die "mount of $DEV (${FST:-unknown fs}) failed" 32
+fi
+save_state
 echo "== mounted $DEV ($FST) at $TARGET with $OPTS"
 grep " $TARGET " /proc/mounts
-echo "next: gumshoe init --mount $TARGET ...   then   gumshoe verify"
-echo "undo: sudo $0 --umount"
+echo "next: create the case in the UI (mount root $TARGET), then Verify"
+echo "undo: $0 --umount"
