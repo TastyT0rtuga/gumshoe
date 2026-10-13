@@ -1,4 +1,4 @@
-<#
+﻿<#
   Gumshoe launcher (what Gumshoe.bat runs). Not elevated.
   First time: hands off to first_run.ps1 with administrator rights. After that: starts Ollama, starts the
   Gumshoe UI inside the DFIR distro and opens the browser. No network is used.
@@ -14,7 +14,7 @@ if (-not (Test-Path $installed)) {
   if (Test-Path (Join-Path $Dest ".reboot-needed")) { Write-Host "(continuing after the reboot)" }
   $fr = Join-Path $PSScriptRoot "first_run.ps1"
   try {
-    $p = Start-Process -FilePath "powershell.exe" -Verb RunAs -Wait -PassThru -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$fr`"", "-Bundle", "`"$Bundle`"", "-Dest", "`"$Dest`"", "-WslName", $WslName)
+    $p = Start-Process -ErrorAction Stop -FilePath "powershell.exe" -Verb RunAs -Wait -PassThru -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$fr`"", "-Bundle", "`"$Bundle`"", "-Dest", "`"$Dest`"", "-WslName", $WslName)
   } catch { Write-Host "Administrator approval was declined; nothing was installed." -ForegroundColor Red; exit 1 }
   if (-not (Test-Path $installed)) {
     if (Test-Path (Join-Path $Dest ".reboot-needed")) { Write-Host "`nReboot now, then double-click Gumshoe.bat again." -ForegroundColor Yellow }
@@ -50,4 +50,4 @@ else {
 Start-Process "http://localhost:$Port"
 Write-Host ""
 Write-Host "Gumshoe is running at http://localhost:$Port  (keep the minimized wsl window open)." -ForegroundColor Green
-Write-Host "Evidence images go under C:\DFIR\evidence (or any folder); mount with  wsl -d $WslName -u root -- mount_image <image>  — see docs\RUNBOOK.md."
+Write-Host "Evidence images go under C:\DFIR\evidence (or any folder); mount with  wsl -d $WslName -u root -- mount_image <image>   (see docs\RUNBOOK.md)."

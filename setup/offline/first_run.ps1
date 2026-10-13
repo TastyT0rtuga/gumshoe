@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Gumshoe offline first-run installer for the AIR-GAPPED Windows 11 sandbox. Started by Gumshoe.bat
   with administrator rights the first time it is double-clicked. Nothing here touches the network.
@@ -28,7 +28,12 @@ New-Item -ItemType Directory -Force -Path $Dest | Out-Null
 Start-Transcript -Path (Join-Path $Dest "first-run.log") -Append | Out-Null
 $ok = $true
 function Fail($msg) { Write-Host "FAILED: $msg" -ForegroundColor Red; $script:ok = $false }
-function Leave([int]$code) { Stop-Transcript | Out-Null; if ($code -ne 0) { Pause-IfConsole }; exit $code }
+function Leave([int]$code) {
+  Stop-Transcript | Out-Null
+  try { Copy-Item (Join-Path $Dest "first-run.log") (Join-Path $Bundle "first-run.log") -Force -ErrorAction SilentlyContinue } catch {}
+  if ($code -ne 0) { Pause-IfConsole }
+  exit $code
+}
 
 Write-Host "Gumshoe offline first run" -ForegroundColor White
 Write-Host "  bundle : $Bundle"
@@ -115,7 +120,12 @@ if ($vmp -and $vmp.State -ne "Enabled") {
   Write-Ok "Virtual Machine Platform enabled"
 } elseif ($vmp) { Write-Ok "Virtual Machine Platform already enabled" }
 $cfg = Join-Path $env:USERPROFILE ".wslconfig"
+if ((Test-Path $cfg) -and -not (Select-String -Path $cfg -Pattern "gumshoe" -Quiet)) {
+  Copy-Item $cfg "$cfg.before-gumshoe" -Force
+  Write-Warn2 "an existing .wslconfig was backed up to .wslconfig.before-gumshoe"
+}
 @"
+# written by gumshoe first_run.ps1
 [wsl2]
 memory=${WslMemoryGB}GB
 processors=$WslProcessors
@@ -139,7 +149,6 @@ else {
   & wsl.exe --import $WslName $vhdDir (Join-Path $Bundle "wsl\rootfs.tar.gz") --version 2
   if ($LASTEXITCODE -ne 0 -or -not (Test-WslDistro $WslName)) { Fail "wsl --import failed ($LASTEXITCODE)" } else { Write-Ok "imported into $vhdDir" }
 }
-& wsl.exe --set-default $WslName 2>$null | Out-Null
 if (-not $ok) { Leave 3 }
 
 # ---- 5. provision ----------------------------------------------------------------------------------

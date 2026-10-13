@@ -1,5 +1,7 @@
-# Shared helpers for the Gumshoe offline launcher scripts (dot-sourced). No network is used anywhere.
-$ErrorActionPreference = "Stop"
+﻿# Shared helpers for the Gumshoe offline launcher scripts (dot-sourced). No network is used anywhere.
+# Continue, not Stop: Windows PowerShell 5.1 turns a native command's stderr into a terminating error when it is
+# redirected (2>$null) under Stop. Every call below is checked through $LASTEXITCODE or its result instead.
+$ErrorActionPreference = "Continue"
 $env:WSL_UTF8 = "1"            # wsl.exe prints UTF-16 otherwise, which PowerShell mangles when captured
 
 function Write-Step($msg) { Write-Host ""; Write-Host "=== $msg" -ForegroundColor Cyan }
