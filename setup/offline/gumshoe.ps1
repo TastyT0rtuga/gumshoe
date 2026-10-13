@@ -26,15 +26,16 @@ if (-not (Test-Path $installed)) {
 }
 
 Write-Step "Ollama"
-if (-not (Start-Ollama)) { Write-Host "Cannot continue without Ollama. See $Dest\first-run.log" -ForegroundColor Red; exit 1 }
-$models = Get-OllamaModels; Write-Host ("  models: " + ($models -join ", "))
+$OllamaPort = Start-OllamaForGumshoe $Bundle
+if ($OllamaPort -eq 0) { Write-Host "Cannot continue without an Ollama that has the bundled models. See $Dest\first-run.log" -ForegroundColor Red; exit 1 }
+Write-Host ("  models on port ${OllamaPort}: " + ((Get-OllamaModels $OllamaPort) -join ", "))
 
 Write-Step "WSL distro $WslName"
 if (-not (Test-WslDistro $WslName)) { Write-Host "distro $WslName is missing; delete $installed and double-click Gumshoe.bat to reinstall" -ForegroundColor Red; exit 1 }
 & wsl.exe -d $WslName -u root -- test -f /opt/dfir/.provisioned
 if ($LASTEXITCODE -ne 0) { Write-Host "distro is not provisioned; delete $installed and double-click Gumshoe.bat to reinstall" -ForegroundColor Red; exit 1 }
 # can the distro reach Ollama? mirrored networking -> 127.0.0.1; NAT -> the Windows host address
-[void](Ensure-OllamaFromWsl $WslName)
+[void](Ensure-OllamaFromWsl $WslName $OllamaPort)
 
 if ($Selftest) {
   Write-Step "self-test"

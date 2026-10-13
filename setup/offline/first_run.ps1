@@ -79,6 +79,7 @@ if (-not $SkipVerify) {
 
 # ---- 2. Ollama + models ---------------------------------------------------------------------------
 Write-Step "2/6 Ollama and the model store"
+$justInstalled = $false
 if (-not (Get-OllamaExe)) {
   Write-Host "  installing Ollama silently..."
   # not -Wait: Windows PowerShell's -Wait also waits for every descendant, and the installer leaves the
@@ -86,23 +87,29 @@ if (-not (Get-OllamaExe)) {
   $ip = Start-Process -PassThru -FilePath (Join-Path $Bundle "ollama\OllamaSetup.exe") -ArgumentList "/VERYSILENT", "/NORESTART", "/SUPPRESSMSGBOXES"
   $ip.WaitForExit()
   Start-Sleep 3
-  if (-not (Get-OllamaExe)) { Fail "Ollama did not install (see ollama\OllamaSetup.exe /LOG)" }
-} else { Write-Ok "Ollama already installed" }
-Get-Process "ollama*" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue   # the installer auto-starts the tray app
-$store = Join-Path $env:USERPROFILE ".ollama\models"
-New-Item -ItemType Directory -Force -Path $store | Out-Null
-Write-Host "  copying models to $store (about 8 GB; this is the slow part)..."
-& robocopy.exe (Join-Path $Bundle "models") $store /E /NFL /NDL /NJH /NJS /NP | Out-Null
-if ($LASTEXITCODE -ge 8) { Fail "robocopy of the model store failed ($LASTEXITCODE)" } else { Write-Ok "model store copied" }
-[Environment]::SetEnvironmentVariable("OLLAMA_HOST", "0.0.0.0:11434", "User")       # reachable from WSL in NAT mode too
-[Environment]::SetEnvironmentVariable("OLLAMA_KEEP_ALIVE", "30m", "User")
-[Environment]::SetEnvironmentVariable("OLLAMA_MAX_LOADED_MODELS", "1", "User")
-# air-gapped box: an inbound allow rule for WSL -> Ollama costs nothing and saves a NAT-mode headache
-if (-not (Get-NetFirewallRule -DisplayName "Gumshoe Ollama (WSL)" -ErrorAction SilentlyContinue)) {
-  New-NetFirewallRule -DisplayName "Gumshoe Ollama (WSL)" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 11434 -Profile Any | Out-Null
+  if (-not (Get-OllamaExe)) { Fail "Ollama did not install (see ollama\OllamaSetup.exe /LOG)" } else { $justInstalled = $true }
 }
-if (Start-Ollama) { $m = Get-OllamaModels; Write-Ok ("models visible to Ollama: " + ($m -join ", ")); if ($m.Count -lt 3) { Write-Warn2 "expected 4 models (qwen2.5 3b, qwen2.5 7b, nomic-embed-text, bge-m3)" } }
-else { Fail "Ollama is installed but not serving" }
+else { Write-Ok "Ollama already installed" }
+if ($justInstalled) {
+  # the tray app the installer just started is ours to restart with the right settings; an Ollama that was
+  # already on this machine before us is left alone (Start-OllamaForGumshoe works around it instead)
+  Get-Process "ollama*" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+  [Environment]::SetEnvironmentVariable("OLLAMA_HOST", "0.0.0.0:11434", "User")       # reachable from WSL in NAT mode too
+  [Environment]::SetEnvironmentVariable("OLLAMA_KEEP_ALIVE", "30m", "User")
+  [Environment]::SetEnvironmentVariable("OLLAMA_MAX_LOADED_MODELS", "1", "User")
+}
+$store = Get-OllamaModelsDir
+Write-Host "  copying models to $store (about 8 GB; this is the slow part)..."
+if (Copy-ModelStore $Bundle $store) { Write-Ok "model store copied" } else { Fail "robocopy of the model store failed ($LASTEXITCODE)" }
+# air-gapped box: an inbound allow rule for WSL -> Ollama costs nothing and saves a NAT-mode headache
+if (Get-NetFirewallRule -DisplayName "Gumshoe Ollama (WSL)" -ErrorAction SilentlyContinue) {
+  Get-NetFirewallRule -DisplayName "Gumshoe Ollama (WSL)" | Set-NetFirewallRule -LocalPort 11434, 11435 -ErrorAction SilentlyContinue
+} else {
+  New-NetFirewallRule -DisplayName "Gumshoe Ollama (WSL)" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 11434, 11435 -Profile Any | Out-Null
+}
+$OllamaPort = Start-OllamaForGumshoe $Bundle
+if ($OllamaPort -eq 0) { Fail "no Ollama with the bundled models could be started" }
+else { Write-Ok ("models visible on port ${OllamaPort}: " + ((Get-OllamaModels $OllamaPort) -join ", ")) }
 
 # ---- 3. WSL ----------------------------------------------------------------------------------------
 Write-Step "3/6 WSL"
@@ -165,7 +172,7 @@ Write-Ok "provisioned"
 
 # ---- 6. verify -------------------------------------------------------------------------------------
 Write-Step "6/6 verification inside the distro"
-[void](Ensure-OllamaFromWsl $WslName)
+[void](Ensure-OllamaFromWsl $WslName $OllamaPort)
 & wsl.exe -d $WslName -u root -- bash /opt/dfir/gumshoe/setup/wsl/03_verify_offline.sh
 if ($LASTEXITCODE -ne 0) { Write-Warn2 "some checks failed (see above). Gumshoe-Selftest.bat re-runs them any time." }
 else { Write-Ok "all checks passed" }
