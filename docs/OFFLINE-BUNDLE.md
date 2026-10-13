@@ -11,9 +11,13 @@ script it uses; this page says what is in it and how it was built so it can be r
    verifies the bundle → installs Ollama + copies the model store → installs WSL from the MSI and enables
    Virtual Machine Platform if missing (one reboot, then double-click again) → writes `.wslconfig` →
    `wsl --import` of the Ubuntu rootfs as **DFIR** → `wsl_provision.sh` inside it → verification → marker.
-3. Every later run (`setup/offline/gumshoe.ps1`): start Ollama pinned to the P-cores, make sure the distro
-   can reach it (mirrored networking → 127.0.0.1, otherwise the host address is written into
-   `config.yaml`), start `gumshoe ui` in the distro, open `http://localhost:8501`.
+3. Every later run (`setup/offline/gumshoe.ps1`): find or start an Ollama that can see the four bundled
+   models (an Ollama already on 11434 is adopted, or handed the files where it looks; if it still cannot see
+   them, for instance because it runs in Docker or another distro, Gumshoe runs its own on 11435), re-sync
+   `gumshoe/` from the bundle into the distro (cases, unpacked tools and `config.yaml` are kept, so updating
+   Gumshoe means replacing the folder), make sure the distro can reach Ollama (mirrored networking →
+   127.0.0.1, otherwise the host address and port are written into `config.yaml`), start `gumshoe ui`
+   bound to 0.0.0.0 (the only bind Windows can reach from WSL), open `http://localhost:8501`.
 4. `Gumshoe-Selftest.bat` re-runs `setup/wsl/03_verify_offline.sh` (tools, venv, models, *no network*, self-test).
 
 ## Layout
@@ -69,5 +73,8 @@ as the scripted alternative for building a bundle from a Windows machine with WS
 - Plaso and ClamAV (off by default; `gumshoe deep` can enable them) are not in this bundle.
 - The elevated first run installs Ollama for the account that approved the UAC prompt; use the account you
   will work from (it must be an administrator), as on any single-examiner sandbox.
+- Found during the rehearsal on a machine that already had its own Ollama and WSL distros: the launcher
+  coexists with them (second port, no `--set-default`, existing `.wslconfig` backed up). A `.wslconfig`
+  change only takes effect after `wsl --shutdown`; until then the launcher uses NAT addressing.
 - Memory on a 16 GB machine: `.wslconfig` caps the distro at 5 GB; the 7B model needs about 5.5 GB on the
   Windows side. Don't run the deep profile with both 7B and vectors while the UI is open on 3B.
