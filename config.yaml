@@ -110,3 +110,6 @@ text:
 report:
   include_llm_narrative: true
   min_severity_to_archive: high
+
+ui:
+  theme: auto        # auto = follow the browser/OS; or light / dark (also: gumshoe ui --theme dark; and Settings > Theme in the UI menu)

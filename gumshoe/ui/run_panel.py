@@ -97,6 +97,46 @@ def step_status(case_dir: Path, step: str) -> tuple[str, dict]:
     return "failed", s
 
 
+# progress milestones: (substring in the log, percent, what is happening). The last one found wins.
+MILESTONES = {
+    "verify":  [("start:", 5, "starting"), ("hashing", 20, "hashing the image"), ("readonly", 60, "read-only check"),
+                ("finished with exit", 100, "done")],
+    "collect": [("start:", 2, "starting"), ("versions recorded", 4, "recording tool versions"),
+                ("running uac", 6, "UAC collecting artifacts"), ("uac done", 20, "UAC done"),
+                ("running loki", 22, "Loki scanning for IOCs (the long step)"), ("loki done", 56, "Loki done"),
+                ("running goaccess", 58, "GoAccess web statistics"), ("goaccess done", 63, "GoAccess done"),
+                ("converting web and auth logs", 64, "Chainsaw + Sigma over the logs"), ("chainsaw done", 72, "Chainsaw done"),
+                ("[dbreview] copying", 74, "MariaDB review: copying the datadir"), ("[dbreview]", 80, "MariaDB review"),
+                ("[normalize] uac", 86, "normalizing"), ("[normalize] aapanel", 90, "normalizing (panel)"),
+                ("[normalize] documents", 93, "normalizing (documents)"), ("correlating", 97, "correlating"),
+                ("finished with exit", 100, "done")],
+    "reanalyze": [("start:", 5, "starting"), ("[dbreview] copying", 10, "MariaDB review: copying the datadir"),
+                  ("[dbreview]", 30, "MariaDB review"), ("[normalize]", 60, "normalizing"), ("correlating", 90, "correlating"),
+                  ("finished with exit", 100, "done")],
+    "deep":    [("start:", 2, "starting"), ("running uac", 4, "UAC"), ("running loki", 8, "Loki (intense)"), ("loki done", 40, "Loki done"),
+                ("chainsaw done", 48, "Chainsaw done"), ("[dbreview]", 50, "MariaDB review"), ("[normalize]", 58, "normalizing"),
+                ("[documents]", 64, "documents"), ("[index]", 72, "indexing"), ("[vectors]", 80, "vectors"),
+                ("[translate]", 86, "translating"), ("[report]", 94, "report"), ("finished with exit", 100, "done")],
+}
+
+
+def progress_of(case_dir: Path, step: str) -> tuple[int, str]:
+    """(percent, label) from the newest milestone in the step's log."""
+    log = _logs(case_dir) / f"{step}.log"
+    if not log.exists():
+        return 0, ""
+    text = log.read_text("utf-8", errors="replace")
+    # only the last run (logs are appended across runs)
+    cut = text.rfind("] start:")
+    text = text[cut:] if cut >= 0 else text
+    best = (0, "")
+    for needle, pct, label in MILESTONES.get(step, []):
+        pos = text.rfind(needle)
+        if pos >= 0 and (pct >= best[0]):
+            best = (pct, label)
+    return best
+
+
 def tail_log(case_dir: Path, step: str, lines: int = 60) -> str:
     log = _logs(case_dir) / f"{step}.log"
     if not log.exists():
@@ -182,10 +222,40 @@ def render_new_case(cases_root: Path, cfg: dict, compact: bool = False):
         st.rerun()
 
 
+def any_running(case_dir: Path) -> list[str]:
+    return [s for s in STEPS if step_status(case_dir, s)[0] == "running"]
+
+
+def render_sidebar_status(case):
+    """Compact status + progress for every tab; refreshes itself every few seconds while something runs."""
+    running = any_running(case.dir)
+
+    def body():
+        now_running = any_running(case.dir)
+        if not now_running:
+            last = [(s, step_status(case.dir, s)) for s in STEPS]
+            done = [STEPS[s][0] for s, (st_, _) in last if st_ == "done"]
+            failed = [STEPS[s][0] for s, (st_, _) in last if st_ == "failed"]
+            st.caption("**Run:** " + (", ".join(done) + " done" if done else "nothing run yet") + ("; FAILED: " + ", ".join(failed) if failed else ""))
+            return
+        for s in now_running:
+            pct, label = progress_of(case.dir, s)
+            started = _state(case.dir, s).get("started", "")
+            st.progress(min(max(pct, 1), 99) / 100, text=f"{STEPS[s][0]}: {label or 'running'} ({pct}%)")
+            st.caption(f"started {started}")
+    st.fragment(body, run_every="4s" if running else None)()
+
+
 def render_run_tab(case, root: Path, cases_root: Path):
     st.subheader("3. Run the case")
     st.caption("Each step is the same command the runbook uses, started in the background and logged under "
-               "`logs/` in the case folder. Close the browser if you like; the step keeps running.")
+               "`logs/` in the case folder. Close the browser if you like; the step keeps running. "
+               "While a step runs this panel refreshes itself every few seconds.")
+    running = any_running(case.dir)
+    st.fragment(lambda: _render_steps(case, root, cases_root), run_every="4s" if running else None)()
+
+
+def _render_steps(case, root: Path, cases_root: Path):
     for step, (name, blurb, _) in STEPS.items():
         status, state = step_status(case.dir, step)
         c1, c2, c3 = st.columns([1.2, 3, 1])
@@ -193,18 +263,21 @@ def render_run_tab(case, root: Path, cases_root: Path):
         c2.caption(blurb)
         badge = {"idle": "not run", "running": "running", "done": "done", "failed": "FAILED"}[status]
         c3.markdown({"idle": "⚪", "running": "🟡", "done": "🟢", "failed": "🔴"}[status] + " " + badge)
+        if status == "running":
+            pct, label = progress_of(case.dir, step)
+            st.progress(min(max(pct, 1), 99) / 100, text=f"{label or 'running'} ({pct}%)")
         b1, b2, b3 = st.columns([1, 1, 4])
         if status != "running" and b1.button("Start", key=f"start_{step}", type="primary" if status in ("idle", "failed") else "secondary"):
             st.session_state[f"state_{step}"] = start_step(root, cases_root, case.dir, step)
-            st.rerun()
+            st.rerun(scope="app")
         if status == "running" and b1.button("Stop", key=f"stop_{step}"):
             try:
                 os.killpg(int(state["pid"]), signal.SIGTERM)
             except Exception as e:  # noqa: BLE001
                 st.warning(str(e))
-            st.rerun()
+            st.rerun(scope="app")
         if b2.button("Refresh", key=f"refresh_{step}"):
-            st.rerun()
+            st.rerun(scope="app")
         if state:
             with st.expander(f"log: logs/{step}.log  (started {state.get('started')})", expanded=(status == "running")):
                 st.code(tail_log(case.dir, step) or "(empty)")

@@ -26,7 +26,7 @@ CASES = Path(args.cases_root)
 st.set_page_config(page_title="Gumshoe", layout="wide")
 st.title("Gumshoe — cited forensic triage")
 
-from gumshoe.ui.run_panel import render_mount, render_new_case, render_run_tab  # noqa: E402
+from gumshoe.ui.run_panel import render_mount, render_new_case, render_run_tab, render_sidebar_status  # noqa: E402
 
 case_ids = sorted(p.name for p in CASES.iterdir() if (p / "case.json").exists()) if CASES.exists() else []
 if not case_ids:
@@ -50,6 +50,7 @@ with st.sidebar:
     st.markdown("**Read-only:** " + ("✅ " if ro.get("ok") else "⚠️ ") + str(ro.get("reason", "not checked")))
     st.markdown(f"**Custody:** {'✅' if ok_chain else '❌'} {chain_msg}")
     st.markdown(f"**Model:** {'✅ reachable' if ol.available() else '⚠️ Ollama not reachable'}")
+    render_sidebar_status(case)
     st.markdown(f"**Findings:** {summary.get('total', 0)}")
     for s in reversed(SEVERITIES):
         st.markdown(f"- {s}: {summary.get('by_severity', {}).get(s, 0)}")
