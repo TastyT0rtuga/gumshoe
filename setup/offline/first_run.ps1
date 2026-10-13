@@ -81,7 +81,10 @@ if (-not $SkipVerify) {
 Write-Step "2/6 Ollama and the model store"
 if (-not (Get-OllamaExe)) {
   Write-Host "  installing Ollama silently..."
-  Start-Process -Wait -FilePath (Join-Path $Bundle "ollama\OllamaSetup.exe") -ArgumentList "/VERYSILENT", "/NORESTART", "/SUPPRESSMSGBOXES"
+  # not -Wait: Windows PowerShell's -Wait also waits for every descendant, and the installer leaves the
+  # Ollama tray app running, so -Wait would never return. WaitForExit() waits for the installer alone.
+  $ip = Start-Process -PassThru -FilePath (Join-Path $Bundle "ollama\OllamaSetup.exe") -ArgumentList "/VERYSILENT", "/NORESTART", "/SUPPRESSMSGBOXES"
+  $ip.WaitForExit()
   Start-Sleep 3
   if (-not (Get-OllamaExe)) { Fail "Ollama did not install (see ollama\OllamaSetup.exe /LOG)" }
 } else { Write-Ok "Ollama already installed" }
@@ -109,7 +112,8 @@ try { $v = (& wsl.exe --version 2>$null) -join "`n"; if ($LASTEXITCODE -eq 0 -an
 if ($wslVer -ge 2) { Write-Ok "WSL $(($v -split "`n")[0].Trim()) present" }
 else {
   Write-Host "  installing WSL from the bundled MSI..."
-  $p = Start-Process -Wait -PassThru msiexec.exe -ArgumentList "/i", (Join-Path $Bundle "wsl\wsl.msi"), "/quiet", "/norestart"
+  $p = Start-Process -PassThru msiexec.exe -ArgumentList "/i", (Join-Path $Bundle "wsl\wsl.msi"), "/quiet", "/norestart"
+  $p.WaitForExit()
   if ($p.ExitCode -notin 0, 3010, 1641) { Fail "wsl.msi returned $($p.ExitCode)" } else { Write-Ok "WSL installed (msiexec $($p.ExitCode))"; $needReboot = $true }
 }
 $vmp = Get-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform -ErrorAction SilentlyContinue

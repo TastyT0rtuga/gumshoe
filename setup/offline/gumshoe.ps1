@@ -14,7 +14,9 @@ if (-not (Test-Path $installed)) {
   if (Test-Path (Join-Path $Dest ".reboot-needed")) { Write-Host "(continuing after the reboot)" }
   $fr = Join-Path $PSScriptRoot "first_run.ps1"
   try {
-    $p = Start-Process -ErrorAction Stop -FilePath "powershell.exe" -Verb RunAs -Wait -PassThru -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$fr`"", "-Bundle", "`"$Bundle`"", "-Dest", "`"$Dest`"", "-WslName", $WslName)
+    $p = Start-Process -ErrorAction Stop -FilePath "powershell.exe" -Verb RunAs -PassThru -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$fr`"", "-Bundle", "`"$Bundle`"", "-Dest", "`"$Dest`"", "-WslName", $WslName)
+    # not -Wait: it would also wait for the `ollama serve` process the installer leaves running
+    $p.WaitForExit()
   } catch { Write-Host "Administrator approval was declined; nothing was installed." -ForegroundColor Red; exit 1 }
   if (-not (Test-Path $installed)) {
     if (Test-Path (Join-Path $Dest ".reboot-needed")) { Write-Host "`nReboot now, then double-click Gumshoe.bat again." -ForegroundColor Yellow }
