@@ -41,6 +41,8 @@ $changed = @(& wsl.exe -d $WslName -u root -- rsync -a --delete --itemize-change
 if ($LASTEXITCODE -ne 0) { Write-Warn2 "could not sync the project from the bundle (rsync $LASTEXITCODE)" }
 elseif ($changed.Count -gt 0) { Write-Ok "project in the distro updated from the bundle ($($changed.Count) files); the UI will be restarted" }
 else { Write-Ok "project in the distro matches the bundle" }
+# a script copied through Windows may have picked up CRLF line endings; bash cannot run those
+& wsl.exe -d $WslName -u root -- sh -c "sed -i 's/\r\$//' /opt/dfir/gumshoe/setup/wsl/*.sh /opt/dfir/gumshoe/setup/offline/*.sh /opt/dfir/gumshoe/gumshoe.py 2>/dev/null; chmod +x /opt/dfir/gumshoe/setup/wsl/*.sh /opt/dfir/gumshoe/setup/offline/*.sh"
 # can the distro reach Ollama? mirrored networking -> 127.0.0.1; NAT -> the Windows host address
 [void](Ensure-OllamaFromWsl $WslName $OllamaPort)
 
