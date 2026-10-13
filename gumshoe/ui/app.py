@@ -26,11 +26,17 @@ CASES = Path(args.cases_root)
 st.set_page_config(page_title="Gumshoe", layout="wide")
 st.title("Gumshoe — cited forensic triage")
 
+from gumshoe.ui.run_panel import render_mount, render_new_case, render_run_tab  # noqa: E402
+
 case_ids = sorted(p.name for p in CASES.iterdir() if (p / "case.json").exists()) if CASES.exists() else []
 if not case_ids:
-    st.warning("No cases yet. Create one: `python gumshoe.py init --case CASE-001 --examiner you --mount /mnt/evidence`")
+    st.info("No cases yet. Mount the evidence image, then create the case; the rest happens in the Run tab.")
+    render_mount(ROOT)
+    render_new_case(CASES, CFG)
     st.stop()
 case_id = st.sidebar.selectbox("Case", case_ids)
+with st.sidebar.expander("New case"):
+    render_new_case(CASES, CFG, compact=True)
 case = Case.open(CASES / case_id, CFG)
 summary = case.read_json("summary.json", {}) or {}
 ol = Ollama(case.cfg["llm"])
@@ -56,7 +62,7 @@ with st.sidebar:
         pins = read_pins(case)
         st.caption("pinned findings: " + (", ".join(pins) if pins else "none"))
 
-tabs = st.tabs(["Findings", "Ask", "Documents", "Browse", "Panel", "Trends", "Timeline", "Reports", "Evidence", "Export", "Custody"])
+tabs = st.tabs(["Run", "Findings", "Ask", "Documents", "Browse", "Panel", "Trends", "Timeline", "Reports", "Evidence", "Export", "Custody"])
 findings = case.read_findings()
 if "export_set" not in st.session_state:
     st.session_state.export_set = {}
@@ -95,6 +101,10 @@ def show_preview(relpath: str, key: str):
         st.success(f"added; export set now {len(st.session_state.export_set)} file(s) — see the Export tab")
 
 with tabs[0]:
+    render_mount(ROOT)
+    render_run_tab(case, ROOT, CASES)
+
+with tabs[1]:
     c1, c2, c3, c4 = st.columns(4)
     sev = c1.multiselect("Severity", SEVERITIES, default=["critical", "high", "medium"])
     src = c2.multiselect("Source", sorted({f["source"] for f in findings}))
@@ -148,7 +158,7 @@ with tabs[0]:
     else:
         st.info("No findings match. Run `gumshoe collect` first.")
 
-with tabs[1]:
+with tabs[2]:
     st.caption("Answers come only from indexed sources and must cite them; citations outside the retrieved set are removed. "
                "Cited files are archived automatically.")
     from gumshoe.memory import read_session, clear_session, list_sessions, read_notes
@@ -209,7 +219,7 @@ with tabs[1]:
                 d = json.loads(line)
                 st.markdown(f"- {d['asked_at']} — {d['question']} → {'answered' if d.get('answer') else 'no model'}")
 
-with tabs[2]:
+with tabs[3]:
     doc = case.read_json("documents.json", {}) or {}
     items = doc.get("items", [])
     if not items:
@@ -227,7 +237,7 @@ with tabs[2]:
             pick = st.selectbox("Open", [i["path"] for i in rows])
             show_preview(pick, "doc" + str(abs(hash(pick))))
 
-with tabs[3]:
+with tabs[4]:
     from gumshoe.integrity import stat_times
     st.caption("Every file on the image, read-only. Open anything; viewing or downloading archives it and logs it.")
     if "browse_path" not in st.session_state:
@@ -262,7 +272,7 @@ with tabs[3]:
             st.session_state.export_set[st.session_state.browse_path] = "directory from browser"
             st.success(f"export set: {len(st.session_state.export_set)} entries (directories export every file under them)")
 
-with tabs[4]:
+with tabs[5]:
     inv = case.read_json("inventory.json", {}) or {}
     aa = inv.get("aapanel") or {}
     if not aa.get("present"):
@@ -331,7 +341,7 @@ with tabs[4]:
             for i in ini:
                 st.json({i["file"]: i["facts"]})
 
-with tabs[5]:
+with tabs[6]:
     trends = case.read_json("trends.json", {}) or {}
     inv = case.read_json("inventory.json", {}) or {}
     for site, s in (trends.get("sites") or {}).items():
@@ -359,7 +369,7 @@ with tabs[5]:
     if not trends and not auth:
         st.info("No trends yet: run `gumshoe collect` with GoAccess and the auth converter.")
 
-with tabs[6]:
+with tabs[7]:
     import sqlite3
     tldb = case.collected / "timeline.db"
     bursts = case.read_json("bursts.json", []) or []
@@ -398,7 +408,7 @@ with tabs[6]:
     else:
         st.info("No timeline yet (UAC bodyfile not normalized).")
 
-with tabs[7]:
+with tabs[8]:
     kind = st.selectbox("Report", ["triage", "trends", "ioc"])
     use_llm = st.checkbox("Include AI narrative sections (labelled, cited, 7B model)", value=False)
     if st.button("Generate"):
@@ -414,7 +424,7 @@ with tabs[7]:
                 st.download_button("download HTML", h.read_bytes(), file_name=h.name, key="dlh" + p.name)
             st.markdown(p.read_text("utf-8")[:20000])
 
-with tabs[8]:
+with tabs[9]:
     mp = case.evidence / "manifest.json"
     if mp.exists():
         m = json.loads(mp.read_text("utf-8"))
@@ -426,7 +436,7 @@ with tabs[8]:
     else:
         st.info("Nothing archived yet. Cited sources and high/critical findings are archived automatically.")
 
-with tabs[9]:
+with tabs[10]:
     es = st.session_state.export_set
     st.caption("Files added from findings, answers or the document viewer. Building copies the originals (tree preserved) with a "
                "hashed manifest and a zip, and logs it.")
@@ -451,7 +461,7 @@ with tabs[9]:
         for zp in prev:
             st.download_button(zp.name, zp.read_bytes(), file_name=zp.name, key="pz" + zp.name)
 
-with tabs[10]:
+with tabs[11]:
     st.markdown(("✅ " if ok_chain else "❌ ") + chain_msg)
     recs = case.custody.tail(200)
     st.dataframe(pd.DataFrame([{"seq": r.seq, "ts": r.ts, "action": r.action, "details": json.dumps(r.details, default=str)[:200]} for r in recs]),

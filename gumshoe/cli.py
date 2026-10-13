@@ -315,6 +315,7 @@ def cmd_ui(args):
     # (NAT localhost forwarding and mirrored networking both speak 127.0.0.1 only)
     cmd = [sys.executable, "-m", "streamlit", "run", str(app), "--server.headless", "true", "--browser.gatherUsageStats", "false",
            "--server.port", str(args.port), "--server.address", getattr(args, "address", None) or "0.0.0.0",
+           "--client.toolbarMode", "minimal",
            "--", "--cases-root", str(Path(args.cases_root).resolve()), "--config", str(args.config or "")]
     subprocess.call(cmd)
 

@@ -37,8 +37,10 @@ if ($LASTEXITCODE -ne 0) { Write-Host "distro is not provisioned; delete $instal
 # keep the distro's copy of Gumshoe current with the bundle (so updating = replacing the folder); the
 # distro keeps its own cases, unpacked tools and config.yaml
 $bwsl = ConvertTo-WslPath $WslName $Bundle
-& wsl.exe -d $WslName -u root -- rsync -a --delete --exclude cases --exclude tools --exclude config.yaml --exclude __pycache__ --exclude .git "$bwsl/gumshoe/" /opt/dfir/gumshoe/
-if ($LASTEXITCODE -eq 0) { Write-Ok "project in the distro matches the bundle" } else { Write-Warn2 "could not sync the project from the bundle (rsync $LASTEXITCODE)" }
+$changed = @(& wsl.exe -d $WslName -u root -- rsync -a --delete --itemize-changes --exclude cases --exclude tools --exclude config.yaml --exclude __pycache__ --exclude .git "$bwsl/gumshoe/" /opt/dfir/gumshoe/ 2>$null | Where-Object { $_ -match '^[<>ch*]' })
+if ($LASTEXITCODE -ne 0) { Write-Warn2 "could not sync the project from the bundle (rsync $LASTEXITCODE)" }
+elseif ($changed.Count -gt 0) { Write-Ok "project in the distro updated from the bundle ($($changed.Count) files); the UI will be restarted" }
+else { Write-Ok "project in the distro matches the bundle" }
 # can the distro reach Ollama? mirrored networking -> 127.0.0.1; NAT -> the Windows host address
 [void](Ensure-OllamaFromWsl $WslName $OllamaPort)
 
@@ -49,6 +51,9 @@ if ($Selftest) {
 }
 
 Write-Step "Gumshoe UI"
+if ((Test-Port $Port) -and $changed.Count -gt 0) {
+  & wsl.exe -d $WslName -u root -- pkill -f "streamlit run" 2>$null; Start-Sleep 2
+}
 if (Test-Port $Port) { Write-Ok "UI already running on $Port" }
 else {
   # a UI left over from an earlier start that Windows cannot reach (wrong bind address) is restarted
