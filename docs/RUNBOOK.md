@@ -281,6 +281,7 @@ record.
 | Symptom | Do this |
 | --- | --- |
 | `gumshoe: command not found` | `source /opt/dfir/venv/bin/activate` or use `/opt/dfir/gumshoe/gumshoe` |
+| Browser shows **Connection error — Is Streamlit still running? ... `streamlit run yourscript.py`** | That is Streamlit's stock dialog, not a Gumshoe command; Streamlit is not installed on Windows, it runs inside the distro. The UI server stopped - almost always because the minimized **wsl** window titled *Gumshoe UI - keep this window open* was closed (that window is the server; closing it stops the distro and anything running in it). Double-click `Gumshoe.bat`, then reload the tab (F5). A server that crashed on its own is restarted by its watchdog within seconds and the tab reconnects by itself; the reason is in `/opt/dfir/logs/ui.log` (`\\wsl.localhost\DFIR\opt\dfir\logs\ui.log`). If a Collect/intake was running when the window was closed it stopped too: Run tab → Start it again (Hopper → Remount first if the evidence mount is gone). |
 | `run gumshoe verify first` | Step 18 |
 | `uac: sudo: a password is required` | run `sudo -v` first, then the collect command again |
 | `chainsaw ... mapping` error | compare `gumshoe/rules/chainsaw-mappings/*.yml` with `mappings/` inside `/opt/dfir/tools/chainsaw`; adjust field keys to that schema |

@@ -477,7 +477,13 @@ def cmd_status(args):
 
 
 def cmd_ui(args):
+    """Run the Streamlit UI under a watchdog: a server that dies (crash, out of memory) is restarted within seconds and the
+    browser tab reconnects by itself; its output goes to <cases-root>/../logs/ui.log so the reason is readable. A stop on
+    purpose (Ctrl-C, pkill from the launcher) ends the loop. The console title says the window must stay open: under WSL,
+    closing it stops the distro and everything running in it."""
     import subprocess
+    import time
+    from .integrity import utc_now
     cfg = _cfg(args)
     app = package_dir() / "ui" / "app.py"
     # 0.0.0.0, not the default IPv6 wildcard: under WSL only an IPv4 listener is reachable from Windows
@@ -489,7 +495,52 @@ def cmd_ui(args):
     if theme in ("light", "dark"):
         cmd += ["--theme.base", theme]
     cmd += ["--", "--cases-root", str(Path(args.cases_root).resolve()), "--config", str(args.config or "")]
-    subprocess.call(cmd)
+    if getattr(args, "no_watchdog", False):
+        sys.exit(subprocess.call(cmd))
+    try:
+        sys.stdout.write("\033]0;Gumshoe UI - keep this window open (closing it stops Gumshoe)\007")
+        sys.stdout.flush()
+    except OSError:
+        pass
+    logdir = Path(args.cases_root).resolve().parent / "logs"
+    try:
+        logdir.mkdir(parents=True, exist_ok=True)
+        log = logdir / "ui.log"
+    except OSError:
+        log = Path("/tmp/gumshoe-ui.log")
+    restarts: list[float] = []
+    while True:
+        print(f"[ui] starting the Gumshoe UI on port {args.port}; output in {log}. KEEP THIS WINDOW OPEN - closing it stops Gumshoe.", flush=True)
+        try:
+            with open(log, "ab") as lf:
+                lf.write(f"\n=== {utc_now()} start: {' '.join(cmd)}\n".encode("utf-8"))
+                lf.flush()
+                p = subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT)
+                try:
+                    rc = p.wait()
+                except KeyboardInterrupt:
+                    p.terminate()
+                    rc = p.wait()
+                    print("[ui] stopped", flush=True)
+                    return
+        except OSError as e:
+            print(f"[ui] cannot start: {e}", flush=True)
+            sys.exit(1)
+        if rc in (0, -2, -15, 130, 143):                 # stopped on purpose (Ctrl-C, the launcher's pkill)
+            print(f"[ui] stopped (exit {rc})", flush=True)
+            return
+        now = time.time()
+        restarts = [t for t in restarts if now - t < 600] + [now]
+        try:
+            tail = log.read_text("utf-8", errors="replace")[-2500:]
+        except OSError:
+            tail = ""
+        print(f"[ui] the UI server exited with code {rc} at {utc_now()} (-9 = killed, usually out of memory). Last lines of {log}:\n{tail}", flush=True)
+        if len(restarts) > 8:
+            print("[ui] it keeps dying (9 times in 10 minutes); not restarting again. Fix what the log shows, then double-click Gumshoe.bat.", flush=True)
+            sys.exit(rc if rc > 0 else 1)
+        print("[ui] restarting in 3 s - the browser tab reconnects by itself", flush=True)
+        time.sleep(3)
 
 
 def cmd_selftest(args):
@@ -622,7 +673,8 @@ def main(argv=None):
     s.add_argument("--show", type=int, default=0)
 
     s = sub.add_parser("status", help="case status"); s.set_defaults(fn=cmd_status)
-    s = sub.add_parser("ui", help="launch the browser UI"); s.set_defaults(fn=cmd_ui); s.add_argument("--port", type=int, default=8501)
+    s = sub.add_parser("ui", help="launch the browser UI (restarted by a watchdog if it dies; --no-watchdog to run it bare)"); s.set_defaults(fn=cmd_ui); s.add_argument("--port", type=int, default=8501)
+    s.add_argument("--no-watchdog", action="store_true")
     s.add_argument("--address", default=None, help="bind address (default 0.0.0.0; use 127.0.0.1 on a native Linux box to keep it local)")
     s.add_argument("--theme", choices=["auto", "light", "dark"], default=None, help="UI theme (default: ui.theme in config.yaml, else follow the browser)")
     s = sub.add_parser("selftest", help="run the bundled self-test"); s.set_defaults(fn=cmd_selftest)

@@ -14,7 +14,12 @@ Everything Gumshoe needs is in this folder. Nothing here uses the network.
      Gumshoe.bat again and it continues where it stopped.
 
   3. From then on, Gumshoe.bat starts the model server and opens http://localhost:8501 in your browser.
-     Keep the minimized "wsl" window open while you work; close it to stop.
+     Keep the minimized window titled "Gumshoe UI - keep this window open" open while you work; closing
+     it stops Gumshoe AND the distro (so also any intake or Collect that is running). If the browser ever
+     shows Streamlit's "Connection error ... streamlit run yourscript.py" dialog, ignore that command (it is
+     Streamlit's stock text; nothing to type in PowerShell): double-click Gumshoe.bat again and reload the tab.
+     A server that dies on its own restarts by itself within seconds; the reason lands in
+     \\wsl.localhost\DFIR\opt\dfir\logs\ui.log.
 
   Gumshoe-Selftest.bat  re-runs all the checks any time (tools, models, no-network, self-test).
 

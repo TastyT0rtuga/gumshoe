@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `gumshoe ui` runs the Streamlit server under a watchdog: a server that dies (crash, out of memory) is restarted
+  within 3 seconds and the browser tab reconnects by itself (9 deaths in 10 minutes stop the loop with the log
+  shown); its output goes to `<cases-root>/../logs/ui.log` (`/opt/dfir/logs/ui.log` on the sandbox); the
+  console window is titled "Gumshoe UI - keep this window open". `--no-watchdog` runs it bare. The runbook and
+  START-HERE explain Streamlit's "Connection error" dialog (not a Gumshoe command; nothing to type in Windows).
 - **Fingerprint** (`gumshoe fingerprint [--path]`, Run tab → What is it built on, a stage of every intake after
   Collect): what the host and its applications are built on, scored - every candidate with a percentage
   (matched indicator weight over total) and the evidence that matched. Host: control panels (aaPanel vs BT
