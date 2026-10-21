@@ -10,12 +10,16 @@
 
 **At a glance:** fully offline · runs on a 16 GB CPU-only workstation · evidence stays read-only ·
 every finding cites a path, line and SHA-256 · hash-chained custody log · view and export any file ·
-Cyrillic-aware · `deep` mode for unattended overnight runs.
+Cyrillic-aware · `deep` mode for unattended overnight runs · drop anything in the **hopper** (E01, raw,
+VHDX/VMDK, zips, folders, a server's set of disks) and it is mounted, cased, hashed and run ·
+**every database to Excel-ready CSV** (100 GB data directories without copying them) · **Players**: who is
+in the data, how they connect, when, and where the money went · **fingerprint**: what the panel and
+every site are built on, scored with the evidence.
 
 ```bash
 git clone https://github.com/<you>/gumshoe && cd gumshoe
 pip install -r requirements.txt
-python gumshoe.py selftest          # 50 checks, no model or evidence needed
+python gumshoe.py selftest          # 53 checks, no model or evidence needed
 python gumshoe.py --help
 ```
 
@@ -51,7 +55,7 @@ profile would reuse and need.
 | 3 | [GoAccess](https://goaccess.io/) | per-IP / path / status / day web statistics (+ its own interactive HTML dashboard) | trends tables and charts |
 | 4 | [Chainsaw](https://github.com/WithSecureLabs/chainsaw) + [Sigma](https://github.com/SigmaHQ/sigma) | community rules over access logs and `auth.log` | converts logs (incl. rotated `.gz`) to JSONL in Sigma field names; per-IP failure-then-success counts |
 | 5 | aaPanel reader (custom) | `default.db` operation log, panel logins, panel cron tasks, sites/FTP/DB accounts, vhost configs, panel settings | all of it; nothing else reads this database |
-| 6 | MariaDB review (custom, WSL) | accounts, `mysql.func` (UDFs), WordPress admins/options, `my.cnf`, `.mysql_history` | copies the datadir into the case, runs a private `mariadbd` with crash recovery on the copy, dumps canned queries to JSON, stops it |
+| 6 | MariaDB review (custom, WSL) | accounts, `mysql.func` (UDFs), WordPress admins/options, `my.cnf`, `.mysql_history` | runs a private `mariadbd` (or the bundled MySQL 8.0 engine) over a read-only **overlay** of the data directory - crash recovery lands in the work folder, nothing is copied - dumps canned queries to JSON, stops it |
 | 7 | Plaso (optional) | full super-timeline | imports `psort` CSV |
 | 8 | ClamAV (optional, off) | second signature engine | parses `clamscan` output; never alongside a model |
 
@@ -59,10 +63,27 @@ Correlation runs after all of them: a Loki hit that is also a request target in 
 access logs becomes critical and gets a linked finding listing who requested it and
 when; a brute-forcing address that also appears in the panel operation log raises both.
 
+Three layers sit on top of the tools, all deterministic (no model involved) and all with a locator on
+every fact:
+
+| Layer | Command / tab | What it gives |
+| --- | --- | --- |
+| **Databases to CSV** | `gumshoe db scan\|extract\|search`, Databases tab | every MariaDB/MySQL data directory (5.x-10.x and 8.0; opened over an overlay, never copied), SQL dump (plain or compressed, parsed in parallel), PostgreSQL dump, SQLite and Access file → one folder per source, one per database, one Excel-ready CSV per table (1,000,000 rows per file, NULL empty, blobs to files), `tables.csv`, `schema.sql`; grep across all of it |
+| **Players** | `gumshoe players build\|list\|show\|find\|trends`, Players tab | every validated identifier (e-mail, phone, IPv4/IPv6, wallet addresses of the main chains with checksum validation, txids, password hashes, IBAN, Luhn-checked cards, SSH fingerprints, usernames, names, domains) from the CSV tables, logs, panel inventory, findings and documents; account rows merged into players over strong identifiers only (never IPs/usernames/names; promiscuous identifiers are not glue; foreign keys followed); linked and shared IPs; activity per day; money per player, wallet and currency; CSV folders + a Markdown dossier per player, indexed for Ask as `players://<id>` |
+| **Fingerprint** | `gumshoe fingerprint [--path]`, Run tab → What is it built on | the control panel (aaPanel vs BT Panel, cPanel, Plesk, DirectAdmin, CyberPanel, Hestia, ISPConfig, Webmin, CloudPanel, 1Panel, CWP ...), Docker containers, services, custom systemd units; per site (from the vhost files, with domains) the framework / CMS / admin framework with version (ThinkPHP, Laravel, Symfony, CodeIgniter, Yii, Hyperf, FastAdmin, Dcat, laravel-admin, Filament, CRMEB, WHMCS, WordPress, Joomla, Drupal, PrestaShop, OpenCart, Discuz!, DedeCMS, Next.js, Django ...), the packages it is built on with the notable ones grouped by purpose (crypto, trading, payments, Telegram, SMS ...), UI kits, language make-up by bytes/files, newest code; per database the table-name signatures and the investment/trading platform pattern. Every candidate scores matched indicators ÷ its indicators, with the matched files listed |
+
 **New to this? Start with `docs/RUNBOOK.md`** — a numbered, do-this-then-this walkthrough
 from the prep machine to the signed report, with what you should see at each step.
 
 ## Quick start (inside the WSL distro, after `setup/`)
+
+The short way: copy the evidence into the hopper folder (`C:\DFIR\hopper`) and press **Intake** in the
+UI (Run tab → Hopper), or `gumshoe intake <item> --examiner "Name"`. It detects what the item is by
+content (E01, raw/dd under any name, VHDX/VMDK/qcow2, a zip/7z/gz of an image or of files, a folder, the
+folder with all the disks of one server), extracts, mounts read-only, assembles second volumes from the
+root's `/etc/fstab`, creates the case, checks read-only, hashes against hash files lying next to the
+image, extracts every database to CSV, runs Collect, fingerprints the stack and builds the players.
+The long way, step by step:
 
 ```bash
 gumshoe mount-help                                   # Arsenal Image Mounter -> wsl --mount -> mount -o ro,noload
@@ -70,6 +91,9 @@ gumshoe init --case CASE-001 --examiner "Name" --image /mnt/d/case/server.E01 \
              --mount /mnt/evidence --notes "scope: ..." --expected-sha256 <from acquisition form>
 gumshoe verify --case CASE-001                       # refuses to continue unless /proc/mounts shows ro
 gumshoe collect --case CASE-001 --db                 # UAC, Loki, GoAccess, log conversion, Chainsaw, panel DB, MariaDB review, normalize
+gumshoe db scan --case CASE-001 && gumshoe db extract --case CASE-001   # every database -> CSV folders
+gumshoe fingerprint --case CASE-001                  # what the host and each site are built on, scored
+gumshoe players build --case CASE-001                # identifiers, links, timelines, wallets, money
 gumshoe index --case CASE-001
 gumshoe ask --case CASE-001 "Which addresses requested files that Loki flagged, and when?"
 gumshoe report --case CASE-001 --kind triage         # markdown + HTML + ioc.csv; archives every high/critical artifact
@@ -234,7 +258,7 @@ What grows with the image is **time and disk**, so the pipeline is phased and re
 | Loki | number of files (not bytes; media over 5 MB is skipped) | 2–12 h | `--intense` only over `intense_globs`; narrow `web_roots` |
 | GoAccess | log bytes, streamed over a pipe (no copy on disk) | minutes per 10 GB | `logs.since/until` |
 | Log conversion + Chainsaw | log bytes; JSONL is ~2× the raw logs | 1–3 h per 50 GB of logs | `logs.since/until`, `logs.keep_jsonl: false` |
-| MariaDB review | datadir size | copy at disk speed; recovery minutes | `dbreview.max_copy_gb`, `dbreview.databases` |
+| MariaDB review / Databases to CSV | datadir size | overlay, no copy; crash recovery minutes; tables stream at disk speed | `dbreview.databases`; `db extract --index` for a subset |
 | Index | number and size of text files (50 MB per-file cap, sampled above) | 0.5–2 h | `index.include_globs`, `max_file_bytes` |
 | Ask / report | findings count, not image size | minutes | model tiers |
 
