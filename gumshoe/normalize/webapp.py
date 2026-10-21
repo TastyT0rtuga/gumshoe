@@ -236,12 +236,22 @@ def run(case) -> list[Finding]:
         for site in discover_sites(root):
             fw, ver = detect_framework(site)
             entry = {"site": case.rel(site), "framework": fw, "version": ver, "configs": config_facts(site, case)}
+            try:
+                from ..fingerprint import app_candidates, app_root_of, notable_packages
+                cands, pk, npm, py = app_candidates(app_root_of(site))
+                entry["stack"] = [{"name": c["name"], "pct": c["pct"], "version": c.get("version")} for c in cands[:5]]
+                entry["notable_packages"] = notable_packages(pk, npm, py)
+                if cands and fw in ("php", "unknown", "static"):
+                    ver = ver or cands[0].get("version")
+            except Exception:  # noqa: BLE001 - the fingerprint is an extra, never a blocker
+                pass
             if fw == "wordpress":
                 entry.update(wp_components(site, case))
             entry["php"] = php_inventory(site, case)
             sites_inv.append(entry)
             cfg_names = [c["file"].rsplit("/", 1)[-1] for c in entry["configs"]]
-            summary = (f"Site {site.name}: {fw}" + (f" {ver}" if ver else "") + f", {entry['php']['php_files']} PHP files"
+            stack = ", ".join(f"{x['name']} {x['pct']}%" for x in (entry.get("stack") or [])[:2])
+            summary = (f"Site {site.name}: {fw}" + (f" {ver}" if ver else "") + (f" [{stack}]" if stack else "") + f", {entry['php']['php_files']} PHP files"
                        + (f", {len(entry.get('plugins', []))} plugins, {len(entry.get('themes', []))} themes" if fw == "wordpress" else "")
                        + (f", config: {', '.join(cfg_names)}" if cfg_names else ""))
             findings.append(Finding(source="webapp", severity="info", rule="webapp.site", title=summary, path=case.rel(site),

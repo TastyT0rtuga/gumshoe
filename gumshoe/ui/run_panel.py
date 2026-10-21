@@ -12,6 +12,7 @@ import sys
 import time
 from pathlib import Path
 
+import pandas as pd
 import streamlit as st
 
 STEPS = {
@@ -27,6 +28,9 @@ STEPS = {
                 lambda c: ["db", "extract"]),
     "players": ("Players", "who is in the evidence: identifiers, links, timelines, wallets and money from the CSV exports, logs, panel and documents (minutes)",
                 lambda c: ["players", "build"]),
+    "fingerprint": ("What is it built on", "control panel, frameworks / CMS / admin frameworks with versions, packages, language make-up, database table signatures - "
+                                           "each with a percentage and its evidence (a minute)",
+                    lambda c: ["fingerprint"]),
 }
 
 
@@ -127,6 +131,7 @@ MILESTONES = {
     "players": [("start:", 2, "starting"), ("[players] start", 4, "reading the database exports"), ("join table", 8, "join tables"), ("[players] [", 20, "scanning tables"),
                 ("auth log", 70, "logs"), ("documents scanned", 80, "documents"), ("players from", 90, "deriving players"), ("CSV folders", 96, "writing CSV folders"),
                 ("finished with exit", 100, "done")],
+    "fingerprint": [("start:", 5, "starting"), ("[fingerprint] host", 70, "host and applications looked at"), ("[fingerprint]", 90, "summarising"), ("finished with exit", 100, "done")],
     "deep":    [("start:", 2, "starting"), ("running uac", 4, "UAC"), ("running loki", 8, "Loki (intense)"), ("loki done", 40, "Loki done"),
                 ("chainsaw done", 48, "Chainsaw done"), ("[dbreview]", 50, "MariaDB review"), ("[normalize]", 58, "normalizing"),
                 ("[documents]", 64, "documents"), ("[index]", 72, "indexing"), ("[vectors]", 80, "vectors"),
@@ -290,6 +295,76 @@ def render_outcome(case):
         st.markdown(" · ".join(bits))
 
 
+def render_fingerprint(case):
+    """The stored fingerprint (collected/fingerprint.json): the summary line, then the host, the applications and the
+    databases with their percentages and evidence."""
+    from gumshoe import fingerprint as fpm
+    fp = fpm.load(case)
+    if not fp:
+        st.caption("not run yet (an intake runs it by itself after Collect)")
+        return
+    st.markdown(f"**{fp.get('summary', '')}**  \n<small>looked at {str(fp.get('generated', ''))[:19]} · `{fp.get('root', '')}`</small>", unsafe_allow_html=True)
+    with st.expander("the evidence: host, applications, databases", expanded=False):
+        h = fp.get("host") or {}
+        if h:
+            st.markdown(f"**Host**: {h.get('os') or '?'}" + (f" · hostname `{h['hostname']}`" if h.get("hostname") else "") +
+                        (f" · PHP {', '.join(h['php_versions'])}" if h.get("php_versions") else ""))
+            if h.get("panels"):
+                st.dataframe(pd.DataFrame([{"panel / runtime": p["name"], "version": p.get("version") or "", "%": p["pct"], "indicators": f"{len(p['matched'])} of {len(p['matched']) + len(p['missed'])}",
+                                            "matched": "; ".join(p["matched"][:6]), "note": p.get("note") or ""} for p in h["panels"]]), hide_index=True, width="stretch")
+            else:
+                st.caption("no known control panel tree on this volume")
+            if h.get("services"):
+                st.caption("services: " + ", ".join(f"{x['name']}{(' ' + x['version']) if x.get('version') else ''}" for x in h["services"]))
+            for key, title, cols in (("containers", "Docker containers", ["name", "image", "cmd", "running", "created"]), ("pm2", "PM2 apps", ["name", "script", "cwd"]),
+                                     ("supervisor", "supervisor programs", ["program", "command", "directory"]), ("units", "custom systemd units", ["unit", "exec", "cwd", "enabled", "description"])):
+                if h.get(key):
+                    st.markdown(f"**{title}** ({len(h[key])})")
+                    st.dataframe(pd.DataFrame([{c: str(x.get(c, "")) for c in cols} for x in h[key][:200]]), hide_index=True, width="stretch")
+        apps = fp.get("apps") or []
+        if apps:
+            st.markdown(f"**Applications** ({len(apps)} roots)")
+            rows = []
+            for a in apps:
+                cands = a.get("candidates") or []
+                comp = a.get("composition") or {}
+                own = comp.get("own") or []
+                rows.append({"root": a["root"], "domains": ", ".join(a.get("domains", [])[:4]), "built on": "; ".join(f"{c['name']}{(' ' + c['version']) if c.get('version') else ''} {c['pct']}%" for c in cands[:3]),
+                             "own code": " / ".join(f"{r['language']} {r['pct_bytes']:.0f}%" for r in own[:4]), "files": str(comp.get("files_seen", "")),
+                             "notable packages": "; ".join(f"{k}: {', '.join(v[:3])}" for k, v in (a.get("notable") or {}).items())[:300],
+                             "UI kits": ", ".join(k["kit"] for k in comp.get("ui_kits", [])[:5]), "newest code": (comp.get("newest_code") or [{}])[0].get("mtime", "")})
+            st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+            pick = st.selectbox("Details of an application root", ["-"] + [a["root"] for a in apps], key="fp_app")
+            if pick != "-":
+                a = next(x for x in apps if x["root"] == pick)
+                for c in (a.get("candidates") or [])[:6]:
+                    st.markdown(f"- **{c['name']}**{(' ' + c['version']) if c.get('version') else ''} — {c['pct']}% ({len(c['matched'])} of {len(c['matched']) + len(c['missed'])} indicators): "
+                                + "; ".join(c["matched"][:8]) + (f"  \n  *{c['note']}*" if c.get("note") else ""))
+                comp = a.get("composition") or {}
+                if comp.get("own") or comp.get("all"):
+                    c1, c2 = st.columns(2)
+                    c1.markdown("**own code** (vendor/node_modules/uploads left out)")
+                    c1.dataframe(pd.DataFrame(comp.get("own") or []), hide_index=True, width="stretch")
+                    c2.markdown("**everything**")
+                    c2.dataframe(pd.DataFrame(comp.get("all") or []), hide_index=True, width="stretch")
+                if comp.get("newest_code"):
+                    st.caption("newest code files: " + "; ".join(f"{n['mtime']} {n['path']}" for n in comp["newest_code"][:10]))
+                pk = a.get("packages") or {}
+                for kind in ("composer", "npm", "python"):
+                    if pk.get(kind):
+                        with st.expander(f"{kind} packages ({len(pk[kind])})"):
+                            st.dataframe(pd.DataFrame([{"package": k, "version": v} for k, v in pk[kind].items()]), hide_index=True, width="stretch")
+        dbs = fp.get("databases") or []
+        if dbs:
+            st.markdown(f"**Databases** ({len(dbs)})")
+            st.dataframe(pd.DataFrame([{"export": d.get("export"), "database": d.get("database"), "tables": d.get("tables"),
+                                        "prefixes": ", ".join(f"{p} ({c})" for p, c in (d.get("prefixes") or {}).items()),
+                                        "signatures": "; ".join(f"{c['name']} {c['pct']}% ({len(c['matched'])} tables)" for c in (d.get("candidates") or [])[:4])} for d in dbs]),
+                         hide_index=True, width="stretch")
+        with st.expander("plain-text report (what `gumshoe fingerprint` prints)"):
+            st.code(fp.get("report") or "", language=None)
+
+
 def any_running(case_dir: Path) -> list[str]:
     return [s for s in STEPS if step_status(case_dir, s)[0] == "running"]
 
@@ -355,6 +430,8 @@ def _render_steps(case, root: Path, cases_root: Path):
             st.rerun(scope="app")
         if status == "done" and step in ("collect", "deep", "reanalyze"):
             render_outcome(case)
+        if step == "fingerprint":
+            render_fingerprint(case)
         if state:
             with st.expander(f"log: logs/{step}.log  (started {state.get('started')})", expanded=(status == "running")):
                 st.code(tail_log(case.dir, step) or "(empty)")

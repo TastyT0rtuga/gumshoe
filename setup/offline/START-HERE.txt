@@ -43,6 +43,9 @@ USING IT (short version; docs\RUNBOOK.md in the gumshoe folder has the full dumm
   - Players tab: who is in the data (every e-mail, phone, IP, wallet, card, hash... validated and
     counted), merged into players over strong identifiers only, with timelines, linked/shared IPs,
     wallets and money per player; look up any identifier; CSV folders + a dossier per player
+  - Run tab -> What is it built on: the control panel, each site's framework / CMS / admin framework
+    with version, the packages it uses, the language make-up and the database table signatures, each
+    with a percentage and the evidence (also: gumshoe fingerprint --path <folder>)
   - Findings tab: filter, tick rows, Flag / Dismiss / notes, Export... (md/html/csv + the files)
   - or at the prompt:     wsl -d DFIR -u root   then   gumshoe --help
 

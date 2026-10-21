@@ -169,6 +169,46 @@ How: a data directory is never copied or written - a private MariaDB (or the bun
 and every table is streamed out. Dumps are parsed straight to CSV (several processes on big plain files).
 Search every exported table from the tab (name, e-mail, phone, IP ...), case-insensitive, any script.
 
+### What is it built on: the fingerprint
+
+Run tab → **What is it built on** (or `gumshoe fingerprint`, `gumshoe fingerprint --path D:\case\tree`). Every
+intake runs it after Collect; it takes about a minute and writes `collected/fingerprint.json` plus the finding
+`stack.fingerprint` (so it goes out with an export). Everything is scored: each candidate gets a percentage
+(the weight of the indicators that matched over the weight of all its indicators) and the list of what matched,
+naming the file or directory, so a 60 % is something you can go and look at.
+
+- **Host**: which control panel is installed - aaPanel / BT Panel (told apart by their own text markers),
+  cPanel, Plesk, DirectAdmin, CyberPanel, HestiaCP, VestaCP, ISPConfig, Webmin/Virtualmin, CloudPanel,
+  1Panel, CWP, Froxlor, mdserver-web, RunCloud, ServerPilot, Forge, Ploi, Dokku, CapRover, Coolify,
+  Easypanel, Cockpit, Portainer - whether the apps live in **Docker containers** (listed with image and
+  command), Kubernetes; the services (nginx/Apache/OpenLiteSpeed, PHP versions, MySQL/MariaDB, PostgreSQL,
+  Redis, MongoDB, Node + PM2 apps, supervisor programs, mail, Tor, VPN/xray, tunnels) and the **custom
+  systemd units** (where bots and daemons get registered).
+- **Applications**: every document root from the nginx/Apache/OLS vhost files (with its domains) plus the
+  usual web-root layouts and nested apps. For each: the framework / CMS / admin framework with version
+  (ThinkPHP 3/5/6/8, Laravel, Lumen, Symfony, CodeIgniter, Yii, CakePHP, Slim, Hyperf, Webman, Workerman,
+  FastAdmin, BuildAdmin, EasyAdmin, Dcat Admin, laravel-admin, Filament, Nova, CRMEB, likeadmin, NiuShop,
+  ShopXO, WHMCS, Pterodactyl, phpMyAdmin, Roundcube, Nextcloud, WordPress, Joomla, Drupal, Magento,
+  PrestaShop, OpenCart, Discuz!, DedeCMS, EmpireCMS, PHPCMS, EyouCMS, Typecho, Next.js, Nuxt, NestJS,
+  Express, Strapi, Django, Flask, Rails, Java, .NET, Go ...), the **packages it is built on** (composer's
+  `vendor/composer/installed.json` with exact versions, composer.json, package.json, requirements.txt), the
+  notable ones grouped by what they do (crypto/blockchain, trading, payments, Telegram/Discord, SMS, e-mail,
+  cloud storage, real-time, geo/device, auth, scraping, exports, proxies), the UI kits (layui, AdminLTE,
+  Element, Bootstrap, KLineChart, TradingView ...), the **language make-up** by bytes and by files - all
+  code, and own code with vendor/node_modules/uploads left out - and the newest-changed code files.
+- **Databases** (from the Databases tab exports): table prefixes and table-name signatures (FastAdmin,
+  Laravel, Dcat, WordPress, WooCommerce, Joomla, Drupal, PrestaShop, OpenCart, Magento, Discuz!, DedeCMS,
+  CRMEB, likeadmin, Yii, Django, Rails, Sequelize/Knex/Prisma, WHMCS, Pterodactyl, the aaPanel database)
+  and the **investment / trading platform pattern** (recharge, withdraw, wallet, coin, kline, leverage,
+  agent, commission, vip, bank card ... - a pattern score over table names, flagged as the finding
+  `stack.platform_pattern`, never an identification of a product).
+
+In practice the "panel" on a fraud server is rarely a hosting panel: it is an admin application, most often
+FastAdmin or Dcat/laravel-admin on ThinkPHP or Laravel, and the fingerprint names it with the version,
+the packages (a TRON API, a Telegram bot SDK, a payment SDK) and the tables. The percentage is only as
+good as the markers: a stripped `vendor/` or renamed directories lower it; the evidence list says which
+markers were missing.
+
 ### Players: who is in the data, how they connect, where the money went
 
 Players tab (or `gumshoe players build|list|show|find|trends`). Built by every intake after the databases

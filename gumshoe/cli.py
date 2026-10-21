@@ -342,6 +342,33 @@ def cmd_players(args):
     con.close()
 
 
+def cmd_fingerprint(args):
+    """What the host and its applications are built on: control panel, frameworks/CMS/admin frameworks with versions,
+    packages, language make-up, database table signatures - each with a percentage and its evidence."""
+    from . import fingerprint
+    from .winpath import to_wsl
+    if args.path:
+        p, note = to_wsl(args.path)
+        if note:
+            print(f"[fingerprint] {note}", file=sys.stderr)
+        root = Path(p)
+        if not root.is_dir():
+            sys.exit(f"not a directory: {root}")
+        if getattr(args, "case", None):
+            r = fingerprint.run(_case(args), print, root=root)
+        else:
+            r = fingerprint.fingerprint_tree(root, print)
+            r["summary"] = fingerprint.summary_line(r)
+            r["report"] = fingerprint.explain(r)
+    else:
+        r = fingerprint.run(_case(args), print)
+    if args.json:
+        print(json.dumps({k: v for k, v in r.items() if k != "report"}, indent=2, ensure_ascii=False, default=str))
+    else:
+        print(r["report"])
+        print("\nSUMMARY: " + r["summary"])
+
+
 def cmd_settings(args):
     """Show or change the examiner settings (hopper / work / exports folders, examiner name)."""
     from . import settings as cfgstore
@@ -569,6 +596,9 @@ def main(argv=None):
     d = psub.add_parser("show"); d.add_argument("id")
     d = psub.add_parser("find"); d.add_argument("text")
     d = psub.add_parser("trends")
+    s = sub.add_parser("fingerprint", help="what it is built on: control panel, frameworks / CMS / admin frameworks with versions, packages, language make-up, "
+                                             "database table signatures - each with a percentage and the evidence"); s.set_defaults(fn=cmd_fingerprint)
+    s.add_argument("--path", help="a mounted image or extracted tree to fingerprint (default: the case's evidence)"); s.add_argument("--json", action="store_true")
     s = sub.add_parser("settings", help="show or set the hopper / work / exports folders and the examiner name"); s.set_defaults(fn=cmd_settings)
     s.add_argument("--hopper"); s.add_argument("--work"); s.add_argument("--exports"); s.add_argument("--examiner")
     s = sub.add_parser("remount", help="after a reboot: mount a case's evidence again as intake did"); s.set_defaults(fn=cmd_remount)

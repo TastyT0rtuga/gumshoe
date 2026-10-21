@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- **Fingerprint** (`gumshoe fingerprint [--path]`, Run tab → What is it built on, a stage of every intake after
+  Collect): what the host and its applications are built on, scored - every candidate with a percentage
+  (matched indicator weight over total) and the evidence that matched. Host: control panels (aaPanel vs BT
+  Panel by their text markers, cPanel, Plesk, DirectAdmin, CyberPanel, Hestia/Vesta, ISPConfig, Webmin/
+  Virtualmin, CloudPanel, 1Panel, CWP, Froxlor, mdserver-web, RunCloud, ServerPilot, Forge, Ploi, Dokku,
+  CapRover, Coolify, Easypanel, Cockpit, Portainer), Docker containers (image, command), Kubernetes,
+  services (web servers, PHP versions, databases, Redis, Mongo, Node/PM2, supervisor, mail, Tor, VPN,
+  tunnels), custom systemd units. Applications: document roots from the vhost files (with domains) and the
+  usual layouts, nested apps; framework / CMS / admin framework with version (ThinkPHP, Laravel, Symfony,
+  CodeIgniter, Yii, Hyperf, Webman, FastAdmin, BuildAdmin, Dcat, laravel-admin, Filament, Nova, CRMEB,
+  likeadmin, WHMCS, Pterodactyl, phpMyAdmin, WordPress, Joomla, Drupal, Magento, PrestaShop, OpenCart,
+  Discuz!, DedeCMS ..., Next/Nuxt/Nest/Express, Django, Flask, Rails, Java, .NET, Go), the packages
+  (composer installed.json, composer.json, package.json, requirements.txt) with the notable ones grouped
+  by purpose (crypto, trading, payments, Telegram, SMS, e-mail, cloud storage, real-time, geo, auth ...),
+  UI kits, language make-up by bytes/files (all code and own code), newest code files. Databases: table
+  prefixes and table-name signatures (FastAdmin, Laravel, Dcat, WordPress, Joomla, Drupal, PrestaShop,
+  OpenCart, Magento, Discuz!, DedeCMS, CRMEB, likeadmin, Yii, Django, Rails, Node ORMs, WHMCS,
+  Pterodactyl, aaPanel) and the investment / trading platform pattern (`stack.platform_pattern`, low).
+  Written to `collected/fingerprint.json` and the `stack.fingerprint` finding; the webapp inventory
+  carries the per-site stack too.
 - **Players** (`gumshoe players build|list|show|find|trends`, the Players tab, a stage of every intake after
   the databases): a deterministic graph of who is in the evidence - every validated identifier (e-mail,
   phone, IPv4/IPv6, wallet addresses of the main chains with checksum validation, transaction ids, password

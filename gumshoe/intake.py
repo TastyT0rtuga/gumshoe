@@ -891,6 +891,15 @@ class Intake:
             from .collect import collect_case
             collect_case(case, db=True, log=self.log)
             self._save(case)
+        # fingerprint: what the host and its applications are built on (after collect so the finding sits with the others)
+        try:
+            from . import fingerprint as fp_mod
+            self.log("[intake] fingerprint: what it is built on")
+            fpr = fp_mod.run(case, self.log)
+            self.record["fingerprint"] = fpr.get("summary")
+            self._save(case)
+        except Exception as e:  # noqa: BLE001
+            self.log(f"[intake] fingerprint: failed: {type(e).__name__}: {e}")
         # players: the graph over everything extracted so far (tables, logs, panel, documents)
         try:
             from . import players as players_mod
@@ -919,8 +928,9 @@ class Intake:
                  f"{sum(d.get('rows_total') or 0 for d in dbs)} rows as CSV") if dbs else "no databases"
         pst = self.record.get("players") or {}
         pltxt = f"; {pst.get('players', 0)} players / {pst.get('entities', 0)} identifiers" if pst else ""
+        fptxt = f"; built on: {self.record['fingerprint']}" if self.record.get("fingerprint") else ""
         self.log(f"[intake] done: case {case_id} in {(time.time() - t0) / 60:.0f} min - {dbtxt}{pltxt}; {s.get('total', 0)} findings" +
-                 (f"; aaPanel {'found at ' + aa.get('path', '/www/server/panel') if aa.get('present') else 'not found'}" if collect else ""))
+                 (f"; aaPanel {'found at ' + aa.get('path', '/www/server/panel') if aa.get('present') else 'not found'}" if collect else "") + fptxt)
         return case
 
     # -- pieces
