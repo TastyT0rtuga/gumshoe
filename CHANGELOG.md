@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Gumshoe-Rescue.bat** (`setup/offline/rescue.ps1`): for the WSL failure where the distro will not start
+  (`getpwnam(root) failed 5`, `User not found`, `WSL_E_USER_NOT_FOUND` - the distro's virtual disk cannot be
+  opened, usually because its drive is full): reports the disk, its drive's free space and the WSL version;
+  restarts just that distro and tests it; checks and repairs the disk with `e2fsck` from a throwaway rescue
+  distro imported from the bundle's rootfs (`wsl --mount --vhd --bare`); tests again; and only if the disk
+  stays dead copies the cases and settings out of it (read-only, `noload`) to `<drive>:\DFIR-rescue\<date>\`
+  and prints the reinstall steps. Nothing is unregistered or deleted; `-Force` checks a healthy disk, `-Keep`
+  keeps the rescue distro, `-Everything` also copies the work folders, `-Disk`/`-RescueDir` override the
+  lookups. The launcher now tells that failure apart from "not provisioned" and points to the rescue
+  instead of suggesting a reinstall.
 - `gumshoe ui` runs the Streamlit server under a watchdog: a server that dies (crash, out of memory) is restarted
   within 3 seconds and the browser tab reconnects by itself (9 deaths in 10 minutes stop the loop with the log
   shown); its output goes to `<cases-root>/../logs/ui.log` (`/opt/dfir/logs/ui.log` on the sandbox); the

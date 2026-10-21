@@ -22,6 +22,9 @@ Everything Gumshoe needs is in this folder. Nothing here uses the network.
      \\wsl.localhost\DFIR\opt\dfir\logs\ui.log.
 
   Gumshoe-Selftest.bat  re-runs all the checks any time (tools, models, no-network, self-test).
+  Gumshoe-Rescue.bat    when Gumshoe.bat says the DFIR distro will not start ("User not found",
+                        "getpwnam(root) failed", WSL_E_USER_NOT_FOUND): finds the cause (usually a full
+                        drive), repairs the distro's disk, copies the cases out if it cannot. Deletes nothing.
 
 WHAT GETS INSTALLED
   - Ollama (local model server) + models: qwen2.5:3b-instruct (interactive), qwen2.5:7b-instruct-q4_K_M

@@ -32,8 +32,20 @@ Write-Host ("  models on port ${OllamaPort}: " + ((Get-OllamaModels $OllamaPort)
 
 Write-Step "WSL distro $WslName"
 if (-not (Test-WslDistro $WslName)) { Write-Host "distro $WslName is missing; delete $installed and double-click Gumshoe.bat to reinstall" -ForegroundColor Red; exit 1 }
-& wsl.exe -d $WslName -u root -- test -f /opt/dfir/.provisioned
-if ($LASTEXITCODE -ne 0) { Write-Host "distro is not provisioned; delete $installed and double-click Gumshoe.bat to reinstall" -ForegroundColor Red; exit 1 }
+$prov = (& wsl.exe -d $WslName -u root -- test -f /opt/dfir/.provisioned 2>&1 | ForEach-Object { "$_" }) -join "`n"
+if ($LASTEXITCODE -eq 1 -and $prov -notmatch 'WSL|Error code|error') {
+  Write-Host "distro is not provisioned; delete $installed and double-click Gumshoe.bat to reinstall" -ForegroundColor Red; exit 1
+} elseif ($LASTEXITCODE -ne 0) {
+  Write-Host "WSL could not start the distro:" -ForegroundColor Red
+  ($prov -split "`n") | ForEach-Object { Write-Host "  $_" }
+  $cfree = try { [math]::Round((Get-PSDrive -Name C).Free / 1GB, 1) } catch { "?" }
+  Write-Host ""
+  Write-Host "The distro is still there with its cases; do NOT reinstall. This is WSL failing to open the distro's disk -" -ForegroundColor Yellow
+  Write-Host "usually because the drive holding it is full (C: has $cfree GB free) or the disk needs a check." -ForegroundColor Yellow
+  Write-Host "Free a few GB on that drive, then double-click Gumshoe-Rescue.bat: it restarts the distro cleanly, checks and" -ForegroundColor Yellow
+  Write-Host "repairs its disk, and copies the cases out if the disk cannot be brought back." -ForegroundColor Yellow
+  exit 1
+}
 # keep the distro's copy of Gumshoe current with the bundle (so updating = replacing the folder); the
 # distro keeps its own cases, unpacked tools and config.yaml
 $bwsl = ConvertTo-WslPath $WslName $Bundle
