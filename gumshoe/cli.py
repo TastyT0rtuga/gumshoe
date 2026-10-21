@@ -230,8 +230,12 @@ def cmd_intake(args):
 
 def cmd_hopper(args):
     """What is lying in the hopper and what each item is."""
-    from .intake import scan_hopper, HOPPER, human
-    items = scan_hopper(Path(args.path) if args.path else HOPPER)
+    from .intake import scan_hopper, human
+    from .settings import hopper_dir
+    hop, note = hopper_dir(Path(args.cases_root))
+    if note and not args.path:
+        print("note:", note)
+    items = scan_hopper(Path(args.path) if args.path else hop)
     if args.json:
         print(json.dumps(items, indent=2, default=str))
         return
@@ -241,6 +245,16 @@ def cmd_hopper(args):
         print(f"{it['name']:50.50s} {it['kind']:10s} {human(it.get('size', 0)):>10s}  {it.get('format', '')}")
         for n in it.get("notes", []):
             print(f"{'':50s} {n}")
+
+
+def cmd_settings(args):
+    """Show or change the examiner settings (hopper / work / exports folders, examiner name)."""
+    from . import settings as cfgstore
+    changes = {k: getattr(args, k) for k in ("hopper", "work", "exports", "examiner") if getattr(args, k) is not None}
+    if changes:
+        cfgstore.save(Path(args.cases_root), changes)
+    cur = cfgstore.load(Path(args.cases_root))
+    print(json.dumps({**cur, "_file": str(cfgstore.settings_path(Path(args.cases_root)))}, indent=2))
 
 
 def cmd_remount(args):
@@ -444,6 +458,8 @@ def main(argv=None):
     s.add_argument("--no-hash", action="store_true", help="skip hashing the images (not recommended)")
     s = sub.add_parser("hopper", help="list what is in the hopper folder and what each item is"); s.set_defaults(fn=cmd_hopper)
     s.add_argument("--path", help="folder to scan (default C:\\DFIR\\hopper = /mnt/c/DFIR/hopper)"); s.add_argument("--json", action="store_true")
+    s = sub.add_parser("settings", help="show or set the hopper / work / exports folders and the examiner name"); s.set_defaults(fn=cmd_settings)
+    s.add_argument("--hopper"); s.add_argument("--work"); s.add_argument("--exports"); s.add_argument("--examiner")
     s = sub.add_parser("remount", help="after a reboot: mount a case's evidence again as intake did"); s.set_defaults(fn=cmd_remount)
     s.add_argument("--replace-mount", action="store_true")
     s = sub.add_parser("deep", help="unattended deep run: every tool, every document, vectors, translations, 7B report (leave it overnight)"); s.set_defaults(fn=cmd_deep)

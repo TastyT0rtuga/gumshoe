@@ -33,10 +33,18 @@ WHERE THINGS ARE
   %USERPROFILE%\.ollama\models     the model store (copied from models\ in this folder)
 
 USING IT (short version; docs\RUNBOOK.md in the gumshoe folder has the full dummy-proof walkthrough)
-  - put the evidence image somewhere the distro can read it (e.g. C:\DFIR\evidence\server.E01)
-  - mount it read-only:   wsl -d DFIR -u root -- mount_image /mnt/c/DFIR/evidence/server.E01
-  - in the UI: New case -> point it at the mount -> Run tools -> Ask / Report
+  - copy the evidence into the hopper folder (C:\DFIR\hopper by default): an E01, a raw/dd/img under
+    any name, a VHDX/VMDK, a zip/7z/gz holding an image, a folder of files, or the folder with all the
+    disks of one server (drive-scsi0, drive-scsi1, their hash files)
+  - in the UI, Run tab -> Hopper: press Intake next to the item (or paste any path, including
+    \\server\share\... and Z:\...). It mounts read-only, creates the case, hashes, runs Collect.
+  - Findings tab: filter, tick rows, Flag / Dismiss / notes, Export... (md/html/csv + the files)
   - or at the prompt:     wsl -d DFIR -u root   then   gumshoe --help
+
+IF C: IS FULL
+  Hopper -> Folders in the UI moves the hopper, the extraction work folder and the exports to any drive.
+  To move the distro's own disk (cases, tools) and the 8 GB model store as well: close the UI and run
+  Gumshoe-MoveToDrive.bat (asks for a drive letter; uses WSL's own --move; nothing is deleted on failure).
 
 OPTIONAL (not included, registration required): Arsenal Image Mounter from arsenalrecon.com if you prefer
 mounting images on the Windows side. The bundled mount_image script covers E01/raw/VHDX/VMDK/LVM in WSL.

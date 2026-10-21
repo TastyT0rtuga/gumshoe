@@ -28,13 +28,16 @@ def _export_dir_file(cases_root: Path) -> Path:
 
 
 def remembered_export_dir(cases_root: Path, case_id: str) -> str:
+    """The last folder exports were copied to, else the settings' exports folder plus the case id."""
     try:
         d = _export_dir_file(cases_root).read_text("utf-8").strip()
         if d:
             return d
     except OSError:
         pass
-    return DEFAULT_EXPORT_WIN + "\\" + case_id
+    from gumshoe import settings as cfgstore
+    base = (cfgstore.load(cases_root).get("exports") or DEFAULT_EXPORT_WIN).rstrip("\\/")
+    return base + "\\" + case_id
 
 
 def _matches(f: dict, text: str) -> bool:

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Folders are settings (`gumshoe settings`, Hopper → Folders in the UI, stored in
+  `/opt/dfir/gumshoe-settings.json`): the hopper, the work folder for extracted images/trees and the
+  exports folder can live on any drive or share, each shown with its free space. The examiner name is
+  prefilled (settings → last intake → newest case → Windows account) and never blocks an intake.
+  `Gumshoe-MoveToDrive.bat` moves the DFIR distro (`wsl --manage --move`), the Ollama model store
+  (`OLLAMA_MODELS`) and the folders to another drive when C: is full. `gumshoe/winpath.py` holds the
+  Windows/UNC path mapping shared by the CLI and the UI.
 - **The hopper** (`gumshoe intake`, Run tab → Hopper): drop anything into `C:\DFIR\hopper` - E01, raw/img
   under any name, VHDX/VMDK/qcow2, zip/7z/gz/xz holding an image, tar/zip of files, an extracted folder,
   or the folder with all the disks of one server - and press Intake. Detection by content (magic bytes,

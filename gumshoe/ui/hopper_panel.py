@@ -16,8 +16,10 @@ from pathlib import Path
 
 import streamlit as st
 
-from gumshoe.intake import HOPPER, HOPPER_WIN, human, mounted_now, scan_hopper, sniff
+from gumshoe import settings as cfgstore
+from gumshoe.intake import human, mounted_now, scan_hopper, sniff
 from gumshoe.ui.run_panel import _alive, any_running, progress_of_text, to_wsl_path
+from gumshoe.winpath import windows_username
 
 JOBS_DIRNAME = ".hopper"
 INTAKE_MILESTONES = [
@@ -48,10 +50,25 @@ def examiner_file(cases_root: Path) -> Path:
 
 
 def remembered_examiner(cases_root: Path) -> str:
+    """The examiner name: settings, then the last intake, then the newest case, then the Windows account."""
     try:
-        return examiner_file(cases_root).read_text("utf-8").strip()
+        v = cfgstore.load(cases_root).get("examiner", "").strip()
+        if v:
+            return v
+        v = examiner_file(cases_root).read_text("utf-8").strip()
+        if v:
+            return v
     except OSError:
-        return ""
+        pass
+    try:
+        cases = sorted((d for d in cases_root.iterdir() if (d / "case.json").exists()), key=lambda d: d.stat().st_mtime, reverse=True)
+        for d in cases:
+            v = (json.loads((d / "case.json").read_text("utf-8")).get("examiner") or "").strip()
+            if v:
+                return v
+    except OSError:
+        pass
+    return windows_username() or ""
 
 
 def start_intake(root: Path, cases_root: Path, path: str, examiner: str, deep: bool, replace: bool, notes: str = "") -> dict:
@@ -72,6 +89,7 @@ def start_intake(root: Path, cases_root: Path, path: str, examiner: str, deep: b
     (jobs_dir(cases_root) / f"{job}.json").write_text(json.dumps(state, indent=2), "utf-8")
     try:
         examiner_file(cases_root).write_text(examiner, "utf-8")
+        cfgstore.save(cases_root, {"examiner": examiner})
     except OSError:
         pass
     return state
@@ -114,14 +132,47 @@ def _item_row(it: dict) -> str:
     return f"**{it['name']}** — {kind} ({fmt})" + (f", {human(it['size'])}" if it.get("size") else "")
 
 
+def render_folders(cases_root: Path):
+    """Where things live: the hopper, the work folder for extracted images, the exports folder - each with free space.
+    Any drive letter or \\\\server\\share works; empty work folder = inside the distro's own disk."""
+    cur = cfgstore.load(cases_root)
+    with st.expander("Folders (hopper, extracted images, exports) - move them to a drive with room", expanded=False):
+        c1, c2, c3 = st.columns(3)
+        hop = c1.text_input("Hopper (drop evidence here)", value=cur["hopper"], key="set_hopper")
+        work = c2.text_input("Work folder for extracted images/trees (empty = inside the distro, on C:)", value=cur["work"], key="set_work",
+                             placeholder=r"D:\DFIR\work")
+        exp = c3.text_input("Exports go to", value=cur["exports"], key="set_exports")
+        for label, val in (("hopper", hop), ("work folder", work or "(the distro's disk, /opt/dfir)"), ("exports", exp)):
+            w = to_wsl_path(val) if val and not val.startswith("(") else "/opt/dfir"
+            free, total = cfgstore.free_space(Path(w))
+            st.caption(f"{label}: `{val}` - {free:.0f} GB free of {total:.0f} GB" if total else f"{label}: `{val}` - drive not reachable yet")
+        if st.button("Save folders", key="set_save"):
+            cfgstore.save(cases_root, {"hopper": hop, "work": work, "exports": exp})
+            for val in (hop, work):
+                if val:
+                    try:
+                        Path(to_wsl_path(val)).mkdir(parents=True, exist_ok=True)
+                    except OSError as e:
+                        st.warning(f"could not create {val}: {e}")
+            st.success("saved; the hopper list below uses the new folder")
+            st.rerun(scope="app")
+        st.caption("The distro's own disk (cases, tools, the extraction work folder when left empty) lives on C:. "
+                   "If C: is full, move the whole distro to another drive once: close Gumshoe, then run  Gumshoe-MoveToDrive.bat  from the bundle "
+                   "(it runs `wsl --manage DFIR --move D:\\DFIR\\wsl` and moves the Ollama models too).")
+
+
 def render_hopper(root: Path, cases_root: Path, cfg: dict, compact: bool = False):
+    hopper, hop_note = cfgstore.hopper_dir(cases_root)
+    hopper_win = cfgstore.load(cases_root)["hopper"]
     if not compact:
         st.subheader("1. Drop the evidence in the hopper")
-        st.caption(f"Put anything into **{HOPPER_WIN}**: an E01, a raw/dd/img (any name), a VHDX/VMDK, a zip/7z/gz holding an image, "
+        st.caption(f"Put anything into **{hopper_win}**: an E01, a raw/dd/img (any name), a VHDX/VMDK, a zip/7z/gz holding an image, "
                    "a folder that is an extracted file system, or the folder with all the disks of one server (drive-scsi0, drive-scsi1 ...). "
                    "Gumshoe works out what it is, mounts it read-only (second volumes included), creates the case, hashes the image(s) "
                    "and runs Collect. Nothing in the hopper is modified.")
+    render_folders(cases_root)
     ex = st.text_input("Examiner (goes on the case and every custody record)", value=remembered_examiner(cases_root), key="hopper_examiner")
+    ex = ex.strip() or "examiner"
     c1, c2 = st.columns(2)
     deep = c1.checkbox("also run Deep afterwards (walk-away: documents, vectors, translations, report)", key="hopper_deep")
     mounted = mounted_now()
@@ -135,51 +186,64 @@ def render_hopper(root: Path, cases_root: Path, cfg: dict, compact: bool = False
         st.warning(f"A run is in progress on case {', '.join(busy)}; its evidence must stay mounted. Intake of disk images waits until it finishes "
                    "(folders of files can go ahead).")
 
-    items = scan_hopper(HOPPER)
-    if not HOPPER.is_dir():
+    def intake_button(it: dict, key: str, label: str = "Intake") -> bool:
+        usable = it["kind"] in ("disk", "ewf", "vmdisk", "archive", "split", "set", "tree")
+        if not usable:
+            return False
+        needs_mount = not (it["kind"] == "tree" or (it["kind"] == "archive" and it.get("contains") == "tree"))
+        why = ""
+        if running:
+            why = "an intake is already running"
+        elif needs_mount and busy and mounted:
+            why = f"a run on case {busy[0]} still needs the current mount"
+        clicked = st.button(label, key=key, type="primary", disabled=bool(why), help=why or None)
+        if why:
+            st.caption(f"waiting: {why}")
+        return clicked
+
+    if hop_note:
+        st.warning(hop_note + " - set another hopper folder under Folders, or paste a path below.")
+    if not hopper.is_dir():
         try:
-            HOPPER.mkdir(parents=True, exist_ok=True)
+            hopper.mkdir(parents=True, exist_ok=True)
         except OSError:
             pass
+    items = scan_hopper(hopper) if hopper.is_dir() else []
     if not items:
-        st.info(f"The hopper is empty. Copy the evidence into {HOPPER_WIN} (Explorer) and press Refresh, or paste a path below.")
+        st.info(f"The hopper ({hopper_win}) is empty. Copy the evidence there (Explorer) and press Refresh, or paste a path below.")
     for i, it in enumerate(items):
         cc1, cc2 = st.columns([5, 1])
         cc1.markdown(_item_row(it))
         for n in it.get("notes", []):
             cc1.caption(n)
-        usable = it["kind"] in ("disk", "ewf", "vmdisk", "archive", "split", "set", "tree")
-        needs_mount = not (it["kind"] == "tree" or (it["kind"] == "archive" and it.get("contains") == "tree"))
-        blocked = running or not ex.strip() or (needs_mount and bool(busy) and bool(mounted))
-        if usable and cc2.button("Intake", key=f"intake_{i}", type="primary", disabled=blocked):
-            start_intake(root, cases_root, it["path"], ex.strip(), deep, replace)
-            st.rerun()
-    if not ex.strip():
-        st.caption("Enter the examiner name to enable the Intake buttons.")
-    if running:
-        st.caption("An intake is running; the next one can start when it is finished.")
+        with cc2:
+            if intake_button(it, f"intake_{i}"):
+                start_intake(root, cases_root, it["path"], ex, deep, replace)
+                st.rerun(scope="app")
     if st.button("Refresh the hopper"):
-        st.rerun()
+        st.rerun(scope="app")
 
-    with st.expander("Or paste a path (Windows, \\\\server\\share, or /mnt/...)"):
-        raw = st.text_input("Path to an image, archive or folder", key="hopper_path", placeholder=r"\\server\cases\case1\Work\drive-scsi0.raw")
-        if raw.strip():
-            st.session_state.pop("path_note", None)
-            wp = to_wsl_path(raw)
-            note = st.session_state.get("path_note")
-            if note:
-                st.warning(note)
-            if Path(wp).exists():
-                it = sniff(Path(wp))
-                st.markdown(_item_row(it))
-                for n in it.get("notes", []):
-                    st.caption(n)
-                if it["kind"] in ("disk", "ewf", "vmdisk", "archive", "split", "set", "tree") and \
-                        st.button("Intake this path", key="intake_path", type="primary", disabled=running or not ex.strip()):
-                    start_intake(root, cases_root, wp, ex.strip(), deep, replace)
-                    st.rerun()
-            else:
-                st.error(f"not found inside the distro: `{wp}`")
+    st.markdown("**Or paste a path** (Windows `C:\\...`, a mapped drive `Z:\\...`, a share `\\\\server\\share\\...`, or `/mnt/...`) "
+                "- then press Enter; the item is identified and an Intake button appears.")
+    raw = st.text_input("Path to an image, archive or folder", key="hopper_path", placeholder=r"\\server\cases\case1\Work\drive-scsi0.raw")
+    if raw.strip():
+        st.session_state.pop("path_note", None)
+        wp = to_wsl_path(raw)
+        note = st.session_state.get("path_note")
+        if note:
+            st.warning(note)
+        if Path(wp).exists():
+            it = sniff(Path(wp))
+            st.markdown(_item_row(it))
+            for n in it.get("notes", []):
+                st.caption(n)
+            if it["kind"] not in ("disk", "ewf", "vmdisk", "archive", "split", "set", "tree"):
+                st.error("this item cannot be taken in: " + (it.get("format") or it["kind"]))
+            elif intake_button(it, "intake_path", "Intake this path"):
+                start_intake(root, cases_root, wp, ex, deep, replace)
+                st.rerun(scope="app")
+        else:
+            st.error(f"not found inside the distro: `{wp}`")
 
     # the intake list refreshes itself while one is running (a fragment: the rest of the page is left alone)
     st.fragment(lambda: render_jobs(cases_root), run_every="4s" if running else None)()

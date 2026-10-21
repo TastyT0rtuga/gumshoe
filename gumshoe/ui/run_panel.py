@@ -26,41 +26,14 @@ STEPS = {
 }
 
 
-def _drvfs_mount(what: str, where: Path) -> str:
-    """Mount a Windows drive letter or \\\\server\\share into the distro (drvfs); returns '' or the error."""
-    if os.path.ismount(where):
-        return ""
-    where.mkdir(parents=True, exist_ok=True)
-    r = subprocess.run(["mount", "-t", "drvfs", what, str(where)], capture_output=True, text=True, errors="replace")
-    return "" if r.returncode == 0 else (r.stderr or r.stdout or f"mount exit {r.returncode}").strip()
-
-
 def to_wsl_path(p: str) -> str:
-    """Any way of writing a path -> where it is inside the distro.
-    C:\\x\\y -> /mnt/c/x/y; a mapped drive (Z:) is mounted on first use; \\\\server\\share\\x (a UNC path, e.g. the
-    case share) is mounted at /mnt/unc/server/share with the examiner's Windows credentials; Linux paths pass through.
-    Quotes (as pasted from Explorer's 'Copy as path') and trailing spaces are dropped."""
-    p = (p or "").strip().strip('"').strip("'").strip()
-    m = re.match(r"^([A-Za-z]):[\\/]?(.*)$", p)
-    if m:
-        d = m.group(1).lower()
-        root = Path(f"/mnt/{d}")
-        if not (root.is_dir() and any(root.iterdir())):      # not auto-mounted: a mapped network drive or a USB plugged in later
-            err = _drvfs_mount(f"{d.upper()}:", root)
-            if err:
-                st.session_state["path_note"] = f"drive {d.upper()}: is not visible inside the distro ({err}); copy the item into {HOPPER_WIN} instead"
-        return str(root / m.group(2).replace("\\", "/")) if m.group(2) else str(root)
-    m = re.match(r"^(?:\\\\|//)([^\\/]+)[\\/]+([^\\/]+)[\\/]?(.*)$", p)
-    if m:
-        server, share, rest = m.group(1), m.group(2), m.group(3).replace("\\", "/")
-        where = Path("/mnt/unc") / server.lower() / share.lower()
-        err = _drvfs_mount(f"\\\\{server}\\{share}", where)
-        if err:
-            st.session_state["path_note"] = (f"the share \\\\{server}\\{share} could not be opened from inside the distro ({err}). "
-                                             f"Map it to a drive letter in Windows (net use Z: \\\\{server}\\{share}) and paste Z:\\..., "
-                                             f"or copy the item into {HOPPER_WIN}")
-        return str(where / rest) if rest else str(where)
-    return p
+    """Any way of writing a path -> where it is inside the distro (see gumshoe.winpath); a note about an
+    unreachable drive or share is left in st.session_state["path_note"]."""
+    from gumshoe.winpath import to_wsl
+    w, note = to_wsl(p)
+    if note:
+        st.session_state["path_note"] = note + ". Copy the item into the hopper folder instead (Hopper -> Folders shows where it is)."
+    return w
 
 
 HOPPER_WIN = r"C:\DFIR\hopper"

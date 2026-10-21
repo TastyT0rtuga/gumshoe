@@ -35,8 +35,9 @@ from typing import Any, Callable, Optional
 
 from .case import Case, project_root
 
-IMAGES_DIR = Path("/opt/dfir/images")     # extracted disk images
-TREES_DIR = Path("/opt/dfir/trees")       # extracted file trees
+# extracted disk images go to <work>/images, file trees to <work>/trees; <work> is /opt/dfir (inside the
+# distro) unless the examiner pointed it at another drive in the settings (C: full)
+DEFAULT_WORK = Path("/opt/dfir")
 HOPPER_WIN = r"C:\DFIR\hopper"
 HOPPER = Path("/mnt/c/DFIR/hopper")
 DEFAULT_TARGET = "/mnt/evidence"
@@ -432,8 +433,9 @@ def _copy_stream(src, dst, total: Optional[int], log: Log, what: str, raw_file=N
 
 
 # --------------------------------------------------------------------------- extraction
-def extract_image(item: dict[str, Any], log: Log) -> Path:
-    """Pull the disk image out of an archive into IMAGES_DIR; returns the image path."""
+def extract_image(item: dict[str, Any], log: Log, work: Path = DEFAULT_WORK) -> Path:
+    """Pull the disk image out of an archive into <work>/images; returns the image path."""
+    IMAGES_DIR = Path(work) / "images"
     src = Path(item["path"])
     fmt = item["format"]
     member = item.get("member") or ""
@@ -449,8 +451,8 @@ def extract_image(item: dict[str, Any], log: Log) -> Path:
     free = _free_gb(IMAGES_DIR) * 2**30
     log(f"[intake] extracting {inner_name} from {src.name} ({fmt}, {human(item['size'])}) into {dest_dir} (free {human(free)}, need about {human(need)})")
     if free < need:
-        raise RuntimeError(f"not enough space in the analysis distro: {human(free)} free, about {human(need)} needed. "
-                           f"Free space (older cases/images under /opt/dfir) or drop the image itself instead of the archive.")
+        raise RuntimeError(f"not enough space in the work folder {IMAGES_DIR.parent}: {human(free)} free, about {human(need)} needed. "
+                           f"Point the work folder at a drive with room (Hopper -> Folders), free space there, or drop the image itself instead of the archive.")
     dest_dir.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".part")
     t0 = time.time()
@@ -485,8 +487,9 @@ def extract_image(item: dict[str, Any], log: Log) -> Path:
     return dest
 
 
-def extract_tree(item: dict[str, Any], log: Log) -> Path:
-    """Unpack an archive of files into TREES_DIR (as root, keeping owners/modes/times where the format has them)."""
+def extract_tree(item: dict[str, Any], log: Log, work: Path = DEFAULT_WORK) -> Path:
+    """Unpack an archive of files into <work>/trees (as root, keeping owners/modes/times where the format has them)."""
+    TREES_DIR = Path(work) / "trees"
     src = Path(item["path"])
     fmt = item["format"]
     dest = TREES_DIR / safe_case_id(src.name)
@@ -497,7 +500,8 @@ def extract_tree(item: dict[str, Any], log: Log) -> Path:
     free = _free_gb(TREES_DIR) * 2**30
     log(f"[intake] extracting {src.name} ({fmt}, {human(item['size'])}) into {dest} (free {human(free)}, need about {human(need)})")
     if free < need:
-        raise RuntimeError(f"not enough space in the analysis distro: {human(free)} free, about {human(need)} needed")
+        raise RuntimeError(f"not enough space in the work folder {TREES_DIR.parent}: {human(free)} free, about {human(need)} needed "
+                           f"(Hopper -> Folders points it at a drive with room)")
     dest.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
     if fmt in ("tar", "gz", "bz2", "xz"):
@@ -521,8 +525,9 @@ def extract_tree(item: dict[str, Any], log: Log) -> Path:
     return dest
 
 
-def join_split(item: dict[str, Any], log: Log) -> Path:
+def join_split(item: dict[str, Any], log: Log, work: Path = DEFAULT_WORK) -> Path:
     """Split raw (.001 .002 ...) -> one image: affuse presents it without copying; otherwise segments are joined."""
+    IMAGES_DIR = Path(work) / "images"
     segs = [Path(s) for s in item["segments"]]
     first = segs[0]
     if shutil.which("affuse"):
@@ -553,8 +558,9 @@ def join_split(item: dict[str, Any], log: Log) -> Path:
     return dest
 
 
-def convert_vmdisk(path: Path, fmt: str, log: Log) -> Path:
-    """qemu-nbd needs the nbd module; without it a VHDX/VMDK/qcow2 is converted to raw (qemu-img) in the distro."""
+def convert_vmdisk(path: Path, fmt: str, log: Log, work: Path = DEFAULT_WORK) -> Path:
+    """qemu-nbd needs the nbd module; without it a VHDX/VMDK/qcow2 is converted to raw (qemu-img) in the work folder."""
+    IMAGES_DIR = Path(work) / "images"
     if Path("/dev/nbd0").exists() or subprocess.run(["modprobe", "nbd", "max_part=16"], capture_output=True).returncode == 0:
         return path
     dest_dir = IMAGES_DIR / safe_case_id(path.name)
@@ -734,12 +740,19 @@ def expected_hashes_for(image: Path) -> dict[str, str]:
 
 # --------------------------------------------------------------------------- the orchestrator
 class Intake:
-    def __init__(self, cases_root: Path, cfg: dict[str, Any], examiner: str, log: Log = print):
+    def __init__(self, cases_root: Path, cfg: dict[str, Any], examiner: str, log: Log = print, work: Optional[Path] = None):
+        from .settings import work_dir
         self.cases_root = Path(cases_root)
         self.cfg = cfg
         self.examiner = examiner
         self.log = log
-        self.record: dict[str, Any] = {"images": [], "volumes": [], "steps": []}
+        if work is None:
+            work, note = work_dir(self.cases_root)
+            if note:
+                log(f"[intake] work folder: {note}; using the distro's own disk instead")
+                work = DEFAULT_WORK
+        self.work = Path(work)
+        self.record: dict[str, Any] = {"images": [], "volumes": [], "steps": [], "work": str(self.work)}
 
     def run(self, path: Path, case_id: Optional[str] = None, deep: bool = False, replace_mount: bool = False,
             hash_images: bool = True, notes: str = "") -> Case:
@@ -757,7 +770,7 @@ class Intake:
 
         mode, mount_root, image_path = "mount", DEFAULT_TARGET, None
         if item["kind"] == "tree" or (item["kind"] == "archive" and item.get("contains") == "tree"):
-            root = Path(item["path"]) if item["kind"] == "tree" else extract_tree(item, self.log)
+            root = Path(item["path"]) if item["kind"] == "tree" else extract_tree(item, self.log, self.work)
             mode, mount_root = "export", str(root)
         else:
             self._ensure_unmounted(replace_mount, check_only=True)   # a refusal must cost nothing: before any extraction
@@ -847,15 +860,15 @@ class Intake:
                 if it.get("contains") != "image":
                     self.log(f"[intake] skipping {Path(it['path']).name}: an archive of files, not a disk (drop it on its own to analyse it)")
                     continue
-                img = extract_image(it, self.log)
+                img = extract_image(it, self.log, self.work)
                 inner = it.get("inner") or {}
                 if inner.get("kind") == "vmdisk":
-                    img = convert_vmdisk(img, inner.get("format", ""), self.log)
+                    img = convert_vmdisk(img, inner.get("format", ""), self.log, self.work)
                 images.append(img)
             elif k == "split":
-                images.append(join_split(it, self.log))
+                images.append(join_split(it, self.log, self.work))
             elif k == "vmdisk":
-                images.append(convert_vmdisk(Path(it["path"]), it.get("format", ""), self.log))
+                images.append(convert_vmdisk(Path(it["path"]), it.get("format", ""), self.log, self.work))
             elif k in ("disk", "ewf"):
                 images.append(Path(it["path"]))
             else:
