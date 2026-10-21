@@ -8,6 +8,7 @@
 #   mount_image image.raw --lv VulnOSv2-vg/root         # choose a logical volume explicitly
 #   mount_image image.raw --part 1 --at /www            # add a 2nd volume on top of the mounted root
 #   mount_image data.raw --lv datavg/www --at /www      # (same image or another one; e.g. a data disk at /www)
+#   mount_image image.raw --list                        # volumes in the image (fs, UUID, label, size); mounts nothing
 #   mount_image --umount                                # undo everything
 #
 # Read-only at every layer: the loop device is read-only, LVM is told to activate the volume group
@@ -16,10 +17,11 @@
 # Works without udev (WSL has none): LVM is run with udev_rules/udev_sync off and the device nodes are
 # created by vgmknodes/dmsetup instead.
 set -uo pipefail
-TARGET=/mnt/evidence; EWF=/mnt/ewf; PART=""; LV=""; IMG=""; AT=""
+TARGET=/mnt/evidence; EWF=/mnt/ewf; PART=""; LV=""; IMG=""; AT=""; LIST=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --umount) IMG=UMOUNT;; --target) TARGET="$2"; shift;; --part) PART="$2"; shift;; --lv) LV="$2"; shift;; --at) AT="$2"; shift;;
+    --list) LIST=1;;
     -h|--help) sed -n 2,13p "$0"; exit 0;;
     *) IMG="$1";;
   esac; shift
@@ -60,7 +62,18 @@ if [ "$IMG" = "UMOUNT" ]; then
 fi
 [ -n "$IMG" ] && [ -f "$IMG" ] || { echo "usage: $0 <image.E01|image.raw|image.dd|image.vhdx> [--part N] [--lv VG/LV] [--target DIR] [--at /www] | --umount"; exit 1; }
 MOUNT_AT="$TARGET"; SAME_IMAGE=0; MAIN_LOOP=""; MAIN_NBD=""; MAIN_PARTS=""
-if [ -n "$AT" ]; then
+if [ "$LIST" = 1 ]; then
+  # inventory only: attach on spare devices, print the volumes, detach; an existing mount is left alone
+  # (the mounted image itself is listed from its own devices, so LVM never sees a duplicate PV)
+  EWF=/mnt/ewf-list; AT="list"
+  if [ -f "$STATE" ]; then
+    # shellcheck disable=SC1090
+    . "$STATE"
+    if [ -n "${IMAGE:-}" ] && [ "$(readlink -f "$IMG")" = "$(readlink -f "$IMAGE")" ]; then
+      SAME_IMAGE=1; MAIN_LOOP="$LOOPDEV"; MAIN_NBD="$NBD"; MAIN_PARTS="$PARTS"
+    fi
+  fi
+elif [ -n "$AT" ]; then
   # an additional volume on top of the mounted root: the original server's /www (data disk), /home, /var/lib/mysql ...
   [ -f "$STATE" ] || die "nothing is mounted yet: mount the root volume first, then add a volume with --at"
   # shellcheck disable=SC1090
@@ -96,7 +109,7 @@ case "${IMG,,}" in
     command -v qemu-nbd >/dev/null || die "qemu-nbd missing (apt install qemu-utils)"
     modprobe nbd max_part=16 2>/dev/null || true
     [ -e /dev/nbd0 ] || die "no /dev/nbd0: this kernel has no nbd module (WSL: use wsl --mount --vhd on the Windows side, or convert to raw with qemu-img)"
-    NBD=/dev/nbd0; [ -n "$AT" ] && NBD=/dev/nbd1
+    NBD=/dev/nbd0; [ -n "$AT" ] && NBD=/dev/nbd1; [ "$LIST" = 1 ] && NBD=/dev/nbd2
     qemu-nbd --read-only --connect="$NBD" "$IMG" || die "qemu-nbd failed"
     sleep 1; RAW="$NBD";;
   *) RAW="$IMG";;
@@ -123,6 +136,46 @@ part_dev(){  # partition N -> device node
 list_parts(){ ls "${BASE}"p* /dev/mapper/"$(basename "$BASE")"p* 2>/dev/null || true; }
 echo "== block devices"; lsblk -o NAME,SIZE,FSTYPE,TYPE,RO "$BASE" 2>/dev/null || true
 
+lv_dev(){  # VG/LV -> an existing device node (symlink, dm name, or /dev/dm-N)
+  local vglv="$1" vg lv d
+  vg="${vglv%%/*}"; lv="${vglv#*/}"
+  for d in "/dev/$vg/$lv" "/dev/mapper/${vg//-/--}-${lv//-/--}"; do [ -e "$d" ] && { echo "$d"; return; }; done
+  d=$(dmsetup info -c --noheadings -o major,minor "${vg//-/--}-${lv//-/--}" 2>/dev/null | tr -d ' ')
+  [ -n "$d" ] && [ -e "/dev/block/$d" ] && { echo "/dev/block/$d"; return; }
+  echo ""
+}
+vol_line(){  # kind=value device -> one machine-readable line: VOL <kind>=<id> fstype= uuid= label= size=
+  local id="$1" d="$2" t u l sz
+  t=$(blkid -o value -s TYPE "$d" 2>/dev/null || true); u=$(blkid -o value -s UUID "$d" 2>/dev/null || true)
+  l=$(blkid -o value -s LABEL "$d" 2>/dev/null || true); sz=$(blockdev --getsize64 "$d" 2>/dev/null || echo 0)
+  printf 'VOL %s fstype=%s uuid=%s label=%s size=%s dev=%s\n' "$id" "${t:-}" "${u:-}" "${l//[[:space:]]/_}" "$sz" "$d"
+}
+if [ "$LIST" = 1 ]; then
+  echo "== volumes"
+  for d in $(list_parts); do n="${d##*p}"; vol_line "part=$n" "$d"; done
+  [ -z "$(list_parts)" ] && vol_line "part=0" "$BASE"
+  PVOUT=$(lvm pvs --noheadings -o pv_name,vg_name --config "$(lvm_cfg)" 2>/dev/null | awk -v b="$BASE" 'index($1,b)==1' || true)
+  if [ -n "$PVOUT" ]; then
+    for vg in $(echo "$PVOUT" | awk '$2!=""{print $2}' | sort -u); do
+      VG="$vg"
+      if lvmc vgchange -ay "$vg" >/dev/null 2>&1 || lvmc vgchange -ay --activationmode partial "$vg" >/dev/null 2>&1; then
+        lvmc vgmknodes "$vg" >/dev/null 2>&1 || true; dmsetup mknodes >/dev/null 2>&1 || true
+        for lvp in $(lvmc lvs --noheadings -o lv_path "$vg" 2>/dev/null); do
+          d=$(lv_dev "${lvp#/dev/}"); [ -n "$d" ] && vol_line "lv=${lvp#/dev/}" "$d"
+        done
+        [ "$SAME_IMAGE" = 1 ] || lvmc vgchange -an "$vg" >/dev/null 2>&1 || true
+      else echo "   lvm: could not activate VG $vg"; fi
+    done
+  fi
+  # detach what --list attached (never the main mount's devices)
+  if [ "$SAME_IMAGE" = 0 ]; then
+    if [ -n "$LOOPDEV" ]; then kpartx -d "$LOOPDEV" >/dev/null 2>&1; losetup -d "$LOOPDEV" 2>/dev/null; fi
+    [ -n "$NBD" ] && qemu-nbd --disconnect "$NBD" >/dev/null 2>&1
+    mountpoint -q "$EWF" && fusermount -u "$EWF" 2>/dev/null
+  fi
+  exit 0
+fi
+
 save_state(){  # %q: paths with spaces survive being sourced back
   if [ -n "$AT" ]; then printf 'EXTRA_%s=%q\n' "$(date +%s)" "$MOUNT_AT|$IMG|$LOOPDEV|$NBD|$VG" >> "$STATE"
   else printf 'TARGET=%q\nEWF=%q\nLOOPDEV=%q\nNBD=%q\nVG=%q\nPARTS=%q\nIMAGE=%q\n' "$TARGET" "$EWF" "$LOOPDEV" "$NBD" "$VG" "$PARTS" "$IMG" > "$STATE"; fi
@@ -144,14 +197,6 @@ activate_vg(){  # $1 = VG; sets nothing, exits non-zero on failure with the real
   lvmc vgmknodes "$vg" >/dev/null 2>&1 || true
   dmsetup mknodes >/dev/null 2>&1 || true
   return 0
-}
-lv_dev(){  # VG/LV -> an existing device node (symlink, dm name, or /dev/dm-N)
-  local vglv="$1" vg lv d
-  vg="${vglv%%/*}"; lv="${vglv#*/}"
-  for d in "/dev/$vg/$lv" "/dev/mapper/${vg//-/--}-${lv//-/--}"; do [ -e "$d" ] && { echo "$d"; return; }; done
-  d=$(dmsetup info -c --noheadings -o major,minor "${vg//-/--}-${lv//-/--}" 2>/dev/null | tr -d ' ')
-  [ -n "$d" ] && [ -e "/dev/block/$d" ] && { echo "/dev/block/$d"; return; }
-  echo ""
 }
 
 DEV=""

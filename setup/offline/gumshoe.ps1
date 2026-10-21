@@ -43,6 +43,9 @@ elseif ($changed.Count -gt 0) { Write-Ok "project in the distro updated from the
 else { Write-Ok "project in the distro matches the bundle" }
 # a script copied through Windows may have picked up CRLF line endings; bash cannot run those
 & wsl.exe -d $WslName -u root -- sh -c "sed -i 's/\r\$//' /opt/dfir/gumshoe/setup/wsl/*.sh /opt/dfir/gumshoe/setup/offline/*.sh /opt/dfir/gumshoe/gumshoe.py 2>/dev/null; chmod +x /opt/dfir/gumshoe/setup/wsl/*.sh /opt/dfir/gumshoe/setup/offline/*.sh"
+# packages an updated bundle adds (debs folder) and the hopper folders
+& wsl.exe -d $WslName -u root -- bash /opt/dfir/gumshoe/setup/offline/wsl_update.sh "$bwsl"
+if (-not (Test-Path "C:\DFIR\hopper")) { New-Item -ItemType Directory -Force -Path "C:\DFIR\hopper" | Out-Null }
 # can the distro reach Ollama? mirrored networking -> 127.0.0.1; NAT -> the Windows host address
 [void](Ensure-OllamaFromWsl $WslName $OllamaPort)
 
@@ -75,4 +78,4 @@ else {
 Start-Process "http://localhost:$Port"
 Write-Host ""
 Write-Host "Gumshoe is running at http://localhost:$Port  (keep the minimized wsl window open)." -ForegroundColor Green
-Write-Host "Evidence images go under C:\DFIR\evidence (or any folder); mount with  wsl -d $WslName -u root -- mount_image <image>   (see docs\RUNBOOK.md)."
+Write-Host "Drop evidence (E01, raw/img, vhdx, zip/7z of an image, or a folder) into C:\DFIR\hopper and press Intake in the Run tab."

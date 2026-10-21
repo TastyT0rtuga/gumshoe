@@ -1,0 +1,195 @@
+"""Examiner review of findings, and exporting a chosen set out of the case.
+
+review.json (in the case directory) holds, per finding id, the examiner's status - open, flagged or
+dismissed - and a note; every change is a custody record. Exporting a set writes four renderings of
+the chosen findings (Markdown, HTML, CSV, JSON, with the examiner's notes), copies the artifacts they
+cite (through export.assemble: tree preserved, hashed manifest, zip), and can put copies in a Windows
+or network folder so the examiner can hand them on.
+"""
+from __future__ import annotations
+
+import csv
+import html
+import io
+import json
+import shutil
+import zipfile
+from pathlib import Path
+from typing import Any, Optional
+
+from .integrity import utc_now, hash_file
+
+STATUSES = ("open", "flagged", "dismissed")
+
+
+def review_path(case) -> Path:
+    return case.dir / "review.json"
+
+
+def load_review(case) -> dict[str, dict[str, Any]]:
+    p = review_path(case)
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text("utf-8")) or {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _save(case, rev: dict[str, dict[str, Any]]) -> None:
+    review_path(case).write_text(json.dumps(rev, indent=2, ensure_ascii=False), "utf-8")
+
+
+def set_status(case, ids: list[str], status: str, note: Optional[str] = None, by: Optional[str] = None) -> dict[str, dict[str, Any]]:
+    if status not in STATUSES:
+        raise ValueError(status)
+    rev = load_review(case)
+    now = utc_now()
+    for fid in ids:
+        r = rev.setdefault(fid, {})
+        r["status"] = status
+        if note is not None and note.strip():
+            r["note"] = note.strip()
+        r["at"] = now
+        r["by"] = by or case.meta.get("examiner")
+    _save(case, rev)
+    case.custody.append("finding_review", {"ids": ids, "status": status, "note": (note or "")[:500]})
+    return rev
+
+
+def set_note(case, fid: str, note: str, by: Optional[str] = None) -> dict[str, dict[str, Any]]:
+    rev = load_review(case)
+    r = rev.setdefault(fid, {"status": "open"})
+    r["note"] = note.strip()
+    r["at"] = utc_now()
+    r["by"] = by or case.meta.get("examiner")
+    _save(case, rev)
+    case.custody.append("finding_note", {"id": fid, "note": note[:500]})
+    return rev
+
+
+def status_of(rev: dict[str, dict[str, Any]], fid: str) -> str:
+    return (rev.get(fid) or {}).get("status") or "open"
+
+
+# --------------------------------------------------------------------------- rendering
+def _fmt_times(f: dict[str, Any]) -> str:
+    parts = [f"{k} {f[k]}" for k in ("mtime", "ctime", "crtime") if f.get(k)]
+    return " · ".join(parts)
+
+
+def findings_markdown(case, findings: list[dict[str, Any]], rev: dict[str, dict[str, Any]], title: str) -> str:
+    meta = case.meta
+    out = [f"# {title}", "",
+           f"Case **{meta.get('case_id')}** · examiner {meta.get('examiner')} · exported {utc_now()} · {len(findings)} finding(s)",
+           f"Evidence: `{meta.get('image_path') or meta.get('mount_root')}`" +
+           (f" · SHA-256 `{(meta.get('image_hashes') or {}).get('computed', {}).get('sha256', '')}`" if (meta.get('image_hashes') or {}).get('computed') else ""),
+           "", "| # | Severity | Status | Source | Finding | Path |", "| --- | --- | --- | --- | --- | --- |"]
+    for i, f in enumerate(findings, 1):
+        st = status_of(rev, f["id"])
+        out.append(f"| {i} | {f['severity']} | {st} | {f['source']} | {_md(f['title'])} | `{f.get('path') or '-'}`" + (f" line {f['line']}" if f.get("line") else "") + " |")
+    out.append("")
+    for i, f in enumerate(findings, 1):
+        r = rev.get(f["id"]) or {}
+        out += [f"## {i}. {_md(f['title'])}", "",
+                f"- **Severity:** {f['severity']} · **Source:** {f['source']} · **Rule:** `{f.get('rule') or '-'}` · **ID:** `{f['id']}`",
+                f"- **Path:** `{f.get('path') or '-'}`" + (f" line {f['line']}" if f.get("line") else "") + (f" · SHA-256 `{f['sha256']}`" if f.get("sha256") else ""),
+                ]
+        t = _fmt_times(f)
+        if t:
+            out.append(f"- **Times:** {t}")
+        if f.get("tags"):
+            out.append(f"- **Tags:** {', '.join(f['tags'])}")
+        if f.get("related"):
+            out.append(f"- **Related:** {', '.join(f['related'])}")
+        if r.get("status") or r.get("note"):
+            out.append(f"- **Examiner:** {r.get('status', 'open')}" + (f" — {_md(r['note'])}" if r.get("note") else "") + (f" ({r.get('by')}, {r.get('at')})" if r.get("at") else ""))
+        if f.get("description"):
+            out += ["", f["description"].strip()]
+        if f.get("excerpt"):
+            out += ["", "```", f["excerpt"].rstrip()[:4000], "```"]
+        tr = (f.get("extra") or {}).get("translation_en")
+        if tr and tr.get("translation"):
+            out += ["", f"Machine translation ({tr.get('model')}; investigative aid, verify against the original):", "", "```", tr["translation"][:4000], "```"]
+        out.append("")
+    out += ["---", "Generated by Gumshoe from the case's normalized findings; the image remains the primary evidence. "
+            "Each finding carries the path (and line) on the image it was derived from."]
+    return "\n".join(out)
+
+
+def _md(s: Any) -> str:
+    return str(s).replace("|", "\\|").replace("\n", " ")
+
+
+def findings_csv(findings: list[dict[str, Any]], rev: dict[str, dict[str, Any]]) -> str:
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["id", "severity", "status", "examiner_note", "source", "rule", "title", "path", "line", "mtime", "ctime", "crtime", "sha256", "tags", "description"])
+    for f in findings:
+        r = rev.get(f["id"]) or {}
+        w.writerow([f["id"], f["severity"], r.get("status", "open"), r.get("note", ""), f["source"], f.get("rule", ""), f["title"],
+                    f.get("path", ""), f.get("line", ""), f.get("mtime", ""), f.get("ctime", ""), f.get("crtime", ""), f.get("sha256", ""),
+                    ";".join(f.get("tags") or []), (f.get("description") or "")[:2000]])
+    return buf.getvalue()
+
+
+def export_findings(case, ids: list[str], name: str, with_artifacts: bool = True, copy_to: Optional[Path] = None,
+                    title: Optional[str] = None, log=print) -> dict[str, Any]:
+    """Write the chosen findings as md/html/csv/json (+ the artifacts they cite) under reports/exports/<name>."""
+    from .report import to_html
+    wanted = set(ids)
+    findings = [f for f in case.read_findings() if f["id"] in wanted]
+    order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+    findings.sort(key=lambda f: (order.get(f["severity"], 9), f["source"], f["title"]))
+    if not findings:
+        return {"error": "no findings matched"}
+    rev = load_review(case)
+    name = "".join(ch if ch.isalnum() or ch in "-_." else "-" for ch in name).strip("-") or "findings"
+    out = case.reports / "exports" / name
+    res: dict[str, Any] = {"name": name, "count": len(findings), "dir": str(out)}
+    if with_artifacts:
+        from .export import assemble
+        r = assemble(case, name, finding_ids=ids, log=log)
+        res["artifacts"] = r
+    out.mkdir(parents=True, exist_ok=True)
+    title = title or f"Findings export: {case.meta.get('case_id')} ({name})"
+    md = findings_markdown(case, findings, rev, title)
+    (out / "findings.md").write_text(md, "utf-8")
+    (out / "findings.html").write_text(to_html(md, title), "utf-8")
+    (out / "findings.csv").write_text(findings_csv(findings, rev), "utf-8")
+    (out / "findings.json").write_text(json.dumps({"case": case.meta.get("case_id"), "examiner": case.meta.get("examiner"), "exported": utc_now(),
+                                                   "findings": findings, "review": {f["id"]: rev.get(f["id"], {}) for f in findings}},
+                                                  indent=2, ensure_ascii=False), "utf-8")
+    zpath = out.with_suffix(".zip")
+    with zipfile.ZipFile(zpath, "a" if zpath.exists() else "w", zipfile.ZIP_DEFLATED) as z:
+        for fn in ("findings.md", "findings.html", "findings.csv", "findings.json"):
+            z.write(out / fn, f"{name}/{fn}")
+    zsha = hash_file(zpath)
+    zpath.with_suffix(".zip.sha256").write_text(f"{zsha}  {zpath.name}\n", "utf-8")
+    res["zip"] = str(zpath)
+    res["zip_sha256"] = zsha
+    res["files"] = [str(out / fn) for fn in ("findings.md", "findings.html", "findings.csv", "findings.json")]
+    case.custody.append("findings_exported", {"name": name, "count": len(findings), "ids": ids[:200], "zip": zpath.name, "zip_sha256": zsha,
+                                              "with_artifacts": with_artifacts})
+    if copy_to:
+        dest = Path(copy_to)
+        try:
+            dest.mkdir(parents=True, exist_ok=True)
+            for fn in ("findings.md", "findings.html", "findings.csv"):
+                shutil.copy2(out / fn, dest / f"{name}-{fn}")
+            shutil.copy2(zpath, dest / zpath.name)
+            shutil.copy2(zpath.with_suffix(".zip.sha256"), dest / zpath.with_suffix(".zip.sha256").name)
+            res["copied_to"] = str(dest)
+            case.custody.append("export_copied", {"name": name, "to": str(dest)})
+        except OSError as e:
+            res["copy_error"] = f"{e}"
+    return res
+
+
+def html_table(findings: list[dict[str, Any]], rev: dict[str, dict[str, Any]]) -> str:
+    """A compact HTML table of findings (for quick viewing in the browser)."""
+    rows = []
+    for f in findings:
+        rows.append("<tr>" + "".join(f"<td>{html.escape(str(x))}</td>" for x in (
+            f["severity"], status_of(rev, f["id"]), f["source"], f["title"], f.get("path") or "", f.get("line") or "")) + "</tr>")
+    return ("<table><tr><th>severity</th><th>status</th><th>source</th><th>title</th><th>path</th><th>line</th></tr>" + "".join(rows) + "</table>")

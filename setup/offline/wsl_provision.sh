@@ -26,7 +26,7 @@ mkdir -p "$DEST" "$(dirname "$LOG")"; : > "$LOG"
 
 PKGS="ca-certificates python3 python3-venv python3-pip git jq unzip xz-utils bzip2 rsync curl file less
       ewf-tools sleuthkit goaccess mariadb-server mariadb-client lvm2 mdadm ntfs-3g kpartx qemu-utils
-      poppler-utils catdoc antiword"
+      poppler-utils catdoc antiword 7zip afflib-tools"
 
 log "1/5 Ubuntu packages from $B/debs (offline)"
 # services must never start during install (no systemd in this distro anyway)

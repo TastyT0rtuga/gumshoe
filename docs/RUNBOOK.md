@@ -55,7 +55,32 @@ Rules that never bend:
 
 Do not go past this line until step 12 is all OK.
 
-## Phase D — mount the image read-only  (~5 minutes)
+## Phase D0 — the hopper: drop it, press Intake  (the normal route)
+
+Phases D and E by hand are still documented below, but the everyday route is the hopper:
+
+1. Copy the evidence into `C:\DFIR\hopper` (Explorer; the launcher creates the folder). Anything goes:
+   an E01, a raw/dd/img under any name (no extension needed), a VHDX/VMDK/qcow2, a zip/7z/gz/xz holding
+   an image, a tar/zip of a file tree, a folder that is an extracted file system, or **the folder that
+   holds all the disks of one server** (`drive-scsi0`, `drive-scsi1.raw`, their hash files, the AXIOM zip
+   - the zip is ignored, the hash files are compared).
+2. Double-click `Gumshoe.bat`. Run tab → **Hopper**: each item is listed with what it is. Type the
+   examiner name once, press **Intake**.
+3. Watch the bar: detect → extract (archives go into the analysis distro, never onto the share) →
+   mount read-only (partitions, LVM, udev-less) → second volumes (`/www`, `/home`, `/var/lib/mysql` on
+   another disk or LV are found through the root's `/etc/fstab` by UUID/label/device order and mounted
+   on top) → case created → read-only check → every image hashed (and compared with a hash file next to
+   it) → Collect (tools, MariaDB review, normalize). Tick *also run Deep* for the overnight run.
+4. When it says done: **Open case**. The outcome line under the run says how many findings and whether
+   aaPanel was found; the Panel tab explains itself when it is empty.
+5. After a reboot the mount is gone; the Run tab shows **Remount this case's evidence** and puts it
+   back exactly as intake mounted it (`gumshoe remount --case X` does the same).
+
+Paths pasted into the UI can be Windows (`C:\...`), a mapped drive (`Z:\...`) or a share
+(`\\server\share\...`): the share is opened from inside the distro with your Windows credentials.
+If that is refused, map it to a drive letter in Windows or copy the item into the hopper.
+
+## Phase D — mount the image read-only by hand  (~5 minutes)
 
 13. Put the E01 (all segments) on the external drive, e.g. `D:\case\server.E01`.
 14. Arsenal Image Mounter → **Mount image** → choose the E01 → tick **Read only** → Mount.
@@ -125,6 +150,17 @@ It runs every tool (including the slow ones), extracts every document, builds th
 vectors, translates all non-Latin findings with the 7B, and writes the triage/trends/IOC reports
 with 7B narrative. Progress is in `reports/deep-run.log`; the end state in `reports/deep-summary.json`.
 Next morning: `gumshoe ui` (fast model) to work through it; `ask --deep` when one answer deserves the 7B.
+
+### Findings: read, mark, export
+
+Findings tab: filter by severity (pills), source, rule, free text and status; tick rows in the table
+to read them in full below (description, excerpt, translation, the artifact itself) and to act on them
+with the bar: **Flag** (with a note), **Dismiss**, **Reopen**, **Archive artifacts**, **Export…**.
+Export writes `findings.md/html/csv/json` (with your notes and statuses) plus the cited files, hashed,
+under `reports/exports/<name>/` in the case and - if you give a folder - copies into Windows
+(`C:\DFIR\exports\<case>` by default, or the case share). Explorer reaches the case folder at
+`\\wsl.localhost\DFIR\opt\dfir\cases\<case>\reports\exports`. Every mark and export is a custody
+record.
 
 ## Phase F — check the work before it leaves the box  (~1 hour of reading)
 

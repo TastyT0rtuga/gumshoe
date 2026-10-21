@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 import sys
 from pathlib import Path
 
@@ -26,17 +27,19 @@ CASES = Path(args.cases_root)
 st.set_page_config(page_title="Gumshoe", layout="wide")
 st.title("Gumshoe — cited forensic triage")
 
-from gumshoe.ui.run_panel import render_mount, render_new_case, render_run_tab, render_sidebar_status  # noqa: E402
+from gumshoe.ui.run_panel import render_mount, render_new_case, render_run_tab, render_sidebar_status, render_manual  # noqa: E402
+from gumshoe.ui.hopper_panel import render_hopper, render_remount, any_job_running  # noqa: E402
 
 case_ids = sorted(p.name for p in CASES.iterdir() if (p / "case.json").exists()) if CASES.exists() else []
 if not case_ids:
-    st.info("No cases yet. Mount the evidence image, then create the case; the rest happens in the Run tab.")
-    render_mount(ROOT)
-    render_new_case(CASES, CFG)
+    st.info("No cases yet. Drop the evidence in the hopper and press Intake; the case appears here when it is ready.")
+    render_hopper(ROOT, CASES, CFG)
+    render_manual(ROOT, CASES, CFG, compact=False)
     st.stop()
-case_id = st.sidebar.selectbox("Case", case_ids)
-with st.sidebar.expander("New case"):
-    render_new_case(CASES, CFG, compact=True)
+if st.session_state.get("case_select") not in case_ids:
+    st.session_state["case_select"] = case_ids[0]
+case_id = st.sidebar.selectbox("Case", case_ids, key="case_select")
+st.sidebar.caption("New evidence: Run tab → Hopper (drop it into C:\\DFIR\\hopper).")
 case = Case.open(CASES / case_id, CFG)
 summary = case.read_json("summary.json", {}) or {}
 ol = Ollama(case.cfg["llm"])
@@ -102,62 +105,15 @@ def show_preview(relpath: str, key: str):
         st.success(f"added; export set now {len(st.session_state.export_set)} file(s) — see the Export tab")
 
 with tabs[0]:
-    render_mount(ROOT)
+    with st.expander("Hopper: intake new evidence (drop it into C:\\DFIR\\hopper)", expanded=any_job_running(CASES)):
+        render_hopper(ROOT, CASES, CFG, compact=True)
+    render_remount(case, ROOT)
+    render_manual(ROOT, CASES, CFG)
     render_run_tab(case, ROOT, CASES)
 
 with tabs[1]:
-    c1, c2, c3, c4 = st.columns(4)
-    sev = c1.multiselect("Severity", SEVERITIES, default=["critical", "high", "medium"])
-    src = c2.multiselect("Source", sorted({f["source"] for f in findings}))
-    text = c3.text_input("Filter text (any script)")
-    script = c4.multiselect("Script", ["cyrillic", "cjk", "arabic", "machine-translated"])
-    rows = [f for f in findings if f["severity"] in sev and (not src or f["source"] in src)
-            and (not text or text.lower() in json.dumps(f, ensure_ascii=False).lower())
-            and (not script or any(s in (f.get("tags") or []) for s in script))]
-    if rows:
-        df = pd.DataFrame([{"id": f["id"], "severity": f["severity"], "source": f["source"], "title": f["title"],
-                            "path": f.get("path"), "line": f.get("line"), "ctime": f.get("ctime"), "rule": f.get("rule")} for f in rows])
-        st.dataframe(df, use_container_width=True, hide_index=True)
-        pick = st.selectbox("Open finding", [f["id"] for f in rows])
-        f = next(x for x in rows if x["id"] == pick)
-        st.markdown(f"### {f['title']}")
-        st.markdown(f"`{f.get('path') or '-'}`" + (f" line {f['line']}" if f.get("line") else "") +
-                    f"  \nSHA-256 `{f.get('sha256') or '-'}`  \nmtime {f.get('mtime')} · ctime {f.get('ctime')} · crtime {f.get('crtime')}  \n"
-                    f"rule `{f.get('rule')}` · tags {', '.join(f.get('tags') or [])} · related {', '.join(f.get('related') or [])}")
-        if f.get("description"):
-            st.write(f["description"])
-        if f.get("excerpt"):
-            st.code(f["excerpt"])
-        tr = (f.get("extra") or {}).get("translation_en")
-        if tr:
-            st.markdown(f"**Machine translation ({tr.get('model')}) — investigative aid, verify against the original**")
-            st.code(tr["translation"])
-            if tr.get("tokens_missing"):
-                st.warning("not reproduced verbatim: " + ", ".join(tr["tokens_missing"]))
-        b1, b2, b3 = st.columns(3)
-        if f.get("path") and b1.button("Archive this artifact", key="arch_" + f["id"]):
-            from gumshoe.archive import archive
-            sc = archive(case, f["path"], f"UI: finding {f['id']}", f["id"], f.get("line"), f.get("line"))
-            st.success("archived" if sc else "not a file on the mount")
-        if f.get("path") and b3.button("Add to export set", key="expf_" + f["id"]):
-            st.session_state.export_set[f["path"]] = f"finding {f['id']}"
-            st.success(f"export set: {len(st.session_state.export_set)} file(s)")
-        from gumshoe.memory import read_pins, set_pin
-        pinned_now = f["id"] in read_pins(case)
-        if b2.button(("Unpin" if pinned_now else "Pin") + " (always offered as a source)", key="pin_" + f["id"]):
-            set_pin(case, f["id"], pinned=not pinned_now)
-            st.rerun()
-        if f.get("path") and st.checkbox("View the artifact", key="view_" + f["id"]):
-            show_preview(f["path"], "f" + f["id"])
-        if any(t in (f.get("tags") or []) for t in ("cyrillic", "cjk", "arabic")) and b2.button("Translate to English (7B)", key="tr_" + f["id"]):
-            from gumshoe.translate import translate_findings
-            with st.spinner("translating..."):
-                r = translate_findings(case, finding_ids=[f["id"]])
-            st.success(f"translated {r.get('translated', 0)}; reload to view") if r.get("translated") else st.warning(r.get("note", "nothing translated"))
-        with st.expander("raw"):
-            st.json(f)
-    else:
-        st.info("No findings match. Run `gumshoe collect` first.")
+    from gumshoe.ui.findings_panel import render_findings_tab
+    render_findings_tab(case, findings, show_preview, CASES)
 
 with tabs[2]:
     st.caption("Answers come only from indexed sources and must cite them; citations outside the retrieved set are removed. "
@@ -477,10 +433,15 @@ with tabs[10]:
     else:
         st.info("Export set is empty.")
     prev = sorted((case.reports / "exports").glob("*.zip")) if (case.reports / "exports").exists() else []
+    st.caption(f"Everything exported from this case is under `reports/exports/` in the case folder, which Explorer opens at "
+               f"`\\\\wsl.localhost\\DFIR\\opt\\dfir\\cases\\{case.meta.get('case_id')}\\reports\\exports`. "
+               "Findings exports (Findings tab → Export…) land there too, with their md/html/csv next to the zip.")
     if prev:
         st.markdown("**Previous exports**")
         for zp in prev:
-            st.download_button(zp.name, zp.read_bytes(), file_name=zp.name, key="pz" + zp.name)
+            d = zp.with_suffix("")
+            extra = " · " + ", ".join(fn for fn in ("findings.md", "findings.html", "findings.csv") if (d / fn).exists()) if d.is_dir() else ""
+            st.download_button(zp.name + extra, zp.read_bytes(), file_name=zp.name, key="pz" + zp.name)
 
 with tabs[11]:
     st.markdown(("✅ " if ok_chain else "❌ ") + chain_msg)

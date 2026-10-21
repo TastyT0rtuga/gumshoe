@@ -83,6 +83,32 @@ def run_tools(case, tools: Optional[list[str]] = None, skip: Optional[list[str]]
     return results
 
 
+def collect_case(case, tools: Optional[list[str]] = None, skip: Optional[list[str]] = None, db: bool = False,
+                 normalize_only: bool = False, log=print) -> dict[str, Any]:
+    """The whole Collect step: tools (unless normalize_only), the MariaDB review (db=True; a failure is recorded
+    and does not stop the run), then normalize. Returns the summary dict."""
+    if not normalize_only:
+        run_tools(case, tools=tools, skip=skip, log=log)
+    extra = []
+    if db:
+        from .dbreview import review
+        from .normalize.base import Finding
+        try:
+            extra = review(case)
+            log(f"[dbreview] {len(extra)} finding(s)")
+        except Exception as e:  # one tool must not sink the run: record it and carry on with the rest
+            import traceback
+            (case.dir / "logs").mkdir(exist_ok=True)
+            (case.dir / "logs" / "dbreview-error.log").write_text(traceback.format_exc(), "utf-8")
+            log(f"[dbreview] FAILED: {type(e).__name__}: {e}  (details: logs/dbreview-error.log; continuing)")
+            case.custody.append("db_review_error", {"error": f"{type(e).__name__}: {e}"[:500]})
+            extra = [Finding(source="dbreview", severity="info", rule="db.review_error",
+                             title=f"MariaDB review failed: {type(e).__name__}",
+                             description=f"{e}"[:800] + " - see logs/dbreview-error.log; re-run with `gumshoe dbreview` after fixing.")]
+    normalize_all(case, extra=extra, log=log)
+    return case.read_json("summary.json", {}) or {}
+
+
 def normalize_all(case, only: Optional[list[str]] = None, log=print, extra: Optional[list[Finding]] = None) -> list[dict[str, Any]]:
     """Run the normalizers (plus any `extra` findings, e.g. from the MariaDB review), correlate, write findings + summary."""
     findings: list[Finding] = list(extra or [])

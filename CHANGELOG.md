@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **The hopper** (`gumshoe intake`, Run tab → Hopper): drop anything into `C:\DFIR\hopper` - E01, raw/img
+  under any name, VHDX/VMDK/qcow2, zip/7z/gz/xz holding an image, tar/zip of files, an extracted folder,
+  or the folder with all the disks of one server - and press Intake. Detection by content (magic bytes,
+  inside archives too), extraction into the distro, read-only mount, second volumes assembled from the
+  root's `/etc/fstab` (UUID/label/device order; `mount_image.sh --list`), case creation, read-only check,
+  every image hashed and compared with hash files lying next to it, Collect (and Deep on request).
+  `intake.json` records it all; `gumshoe remount` puts the mounts back after a reboot (Run tab button).
+  Paths may be `\\server\share\...` or a mapped drive: opened from the distro with drvfs.
+- **Findings explorer**: filters (severity pills, source, rule, text, status, sort), tick-to-select
+  table, Flag/Dismiss/Reopen with notes (review.json + custody records), per-finding detail with the
+  artifact, **Export…** to Markdown/HTML/CSV/JSON + hashed artifacts, copied to a Windows or share folder.
+- Bundle: `7zip` and `afflib-tools` (split raw via affuse) added; `wsl_update.sh` installs packages an
+  updated bundle carries into an already provisioned distro.
 - Evidence probe (`gumshoe/probe.py`): right after a mount, and under a finished Collect/Deep, the UI
   says whether the volume is a Linux root filesystem (OS, hostname), whether aaPanel is on it and
   where, whether the original server kept `/www` (or `/home`, `/var/lib/mysql`) on another volume

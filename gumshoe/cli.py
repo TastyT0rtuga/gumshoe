@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path  # noqa: F401 (used by subcommands)
 
@@ -64,33 +65,13 @@ def cmd_verify(args):
 
 
 def cmd_collect(args):
-    from .collect import run_tools, normalize_all
+    from .collect import collect_case
     c = _case(args)
     ro = c.meta.get("readonly_check") or {}
     if not ro.get("ok") and not args.force:
         sys.exit("run `gumshoe verify` first (or --force to skip the read-only check)")
-    if not args.normalize_only:
-        tools = args.tools.split(",") if args.tools else None
-        skip = args.skip.split(",") if args.skip else None
-        run_tools(c, tools=tools, skip=skip)
-    extra = []
-    if args.db:
-        from .dbreview import review
-        from .normalize.base import Finding
-        try:
-            extra = review(c)
-            print(f"[dbreview] {len(extra)} finding(s)")
-        except Exception as e:  # one tool must not sink the run: record it and carry on with the rest
-            import traceback
-            (c.dir / "logs").mkdir(exist_ok=True)
-            (c.dir / "logs" / "dbreview-error.log").write_text(traceback.format_exc(), "utf-8")
-            print(f"[dbreview] FAILED: {type(e).__name__}: {e}  (details: logs/dbreview-error.log; continuing)")
-            c.custody.append("db_review_error", {"error": f"{type(e).__name__}: {e}"[:500]})
-            extra = [Finding(source="dbreview", severity="info", rule="db.review_error",
-                             title=f"MariaDB review failed: {type(e).__name__}",
-                             description=f"{e}"[:800] + " - see logs/dbreview-error.log; re-run with `gumshoe dbreview` after fixing.")]
-    findings = normalize_all(c, extra=extra)
-    s = c.read_json("summary.json", {})
+    s = collect_case(c, tools=args.tools.split(",") if args.tools else None, skip=args.skip.split(",") if args.skip else None,
+                     db=args.db, normalize_only=args.normalize_only)
     print(json.dumps({"total": s.get("total"), "by_severity": s.get("by_severity"), "by_source": s.get("by_source")}, indent=2))
 
 
@@ -232,6 +213,42 @@ def cmd_ls(args):
         print(f"{'d' if is_dir else '-'} {size:>12}  {mt}  {ct}  {name}{'/' if is_dir else ''}")
     if len(rows) > args.max:
         print(f"... {len(rows) - args.max} more (use --max)")
+
+
+def cmd_intake(args):
+    """Drop anything -> case: detect, extract, mount (+ second volumes), create, verify, collect [, deep]."""
+    from .intake import Intake
+    cfg = _cfg(args)
+    examiner = args.examiner or cfg.get("examiner") or os.environ.get("GUMSHOE_EXAMINER") or ""
+    if not examiner:
+        sys.exit("--examiner is required (or set examiner: in config.yaml)")
+    it = Intake(Path(args.cases_root), cfg, examiner)
+    case = it.run(Path(args.path), case_id=args.case or None, deep=args.deep, replace_mount=args.replace_mount,
+                  hash_images=not args.no_hash, notes=args.notes or "")
+    print(json.dumps({"case": case.meta.get("case_id"), "mode": case.mode, "root": str(case.mount_root)}, indent=2))
+
+
+def cmd_hopper(args):
+    """What is lying in the hopper and what each item is."""
+    from .intake import scan_hopper, HOPPER, human
+    items = scan_hopper(Path(args.path) if args.path else HOPPER)
+    if args.json:
+        print(json.dumps(items, indent=2, default=str))
+        return
+    if not items:
+        print("hopper is empty")
+    for it in items:
+        print(f"{it['name']:50.50s} {it['kind']:10s} {human(it.get('size', 0)):>10s}  {it.get('format', '')}")
+        for n in it.get("notes", []):
+            print(f"{'':50s} {n}")
+
+
+def cmd_remount(args):
+    """After a reboot: mount a case's evidence again exactly as intake did."""
+    from .intake import remount
+    c = _case(args)
+    r = remount(c, replace_mount=args.replace_mount)
+    print(json.dumps({"images": r.get("images"), "volumes": [v.get("mountpoint") for v in r.get("volumes", []) if v.get("mounted")]}, indent=2))
 
 
 def cmd_deep(args):
@@ -419,6 +436,16 @@ def main(argv=None):
     s = sub.add_parser("ls", help="list a directory (or stat a file) on the mounted image"); s.set_defaults(fn=cmd_ls)
     s.add_argument("--path", default="/"); s.add_argument("--max", type=int, default=500)
 
+    s = sub.add_parser("intake", help="drop anything (E01, raw/img, vhdx, zip/7z/gz of an image or of files, a folder, a folder of disks) -> mounted, cased, verified, collected"); s.set_defaults(fn=cmd_intake)
+    s.add_argument("path", help="file or folder (Windows paths are accepted inside WSL as /mnt/c/...)")
+    s.add_argument("--examiner"); s.add_argument("--notes")
+    s.add_argument("--deep", action="store_true", help="run the deep stage after collect")
+    s.add_argument("--replace-mount", action="store_true", help="unmount whatever is mounted now first")
+    s.add_argument("--no-hash", action="store_true", help="skip hashing the images (not recommended)")
+    s = sub.add_parser("hopper", help="list what is in the hopper folder and what each item is"); s.set_defaults(fn=cmd_hopper)
+    s.add_argument("--path", help="folder to scan (default C:\\DFIR\\hopper = /mnt/c/DFIR/hopper)"); s.add_argument("--json", action="store_true")
+    s = sub.add_parser("remount", help="after a reboot: mount a case's evidence again as intake did"); s.set_defaults(fn=cmd_remount)
+    s.add_argument("--replace-mount", action="store_true")
     s = sub.add_parser("deep", help="unattended deep run: every tool, every document, vectors, translations, 7B report (leave it overnight)"); s.set_defaults(fn=cmd_deep)
     s.add_argument("--skip-tools", action="store_true", help="tools already ran; redo normalize/index/translate/report only")
     s.add_argument("--no-vectors", action="store_true")

@@ -26,13 +26,44 @@ STEPS = {
 }
 
 
+def _drvfs_mount(what: str, where: Path) -> str:
+    """Mount a Windows drive letter or \\\\server\\share into the distro (drvfs); returns '' or the error."""
+    if os.path.ismount(where):
+        return ""
+    where.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run(["mount", "-t", "drvfs", what, str(where)], capture_output=True, text=True, errors="replace")
+    return "" if r.returncode == 0 else (r.stderr or r.stdout or f"mount exit {r.returncode}").strip()
+
+
 def to_wsl_path(p: str) -> str:
-    """C:\\x\\y -> /mnt/c/x/y (the UI runs inside WSL); Linux paths pass through."""
-    p = (p or "").strip().strip('"').strip("'")
-    m = re.match(r"^([A-Za-z]):[\\/](.*)$", p)
+    """Any way of writing a path -> where it is inside the distro.
+    C:\\x\\y -> /mnt/c/x/y; a mapped drive (Z:) is mounted on first use; \\\\server\\share\\x (a UNC path, e.g. the
+    case share) is mounted at /mnt/unc/server/share with the examiner's Windows credentials; Linux paths pass through.
+    Quotes (as pasted from Explorer's 'Copy as path') and trailing spaces are dropped."""
+    p = (p or "").strip().strip('"').strip("'").strip()
+    m = re.match(r"^([A-Za-z]):[\\/]?(.*)$", p)
     if m:
-        return f"/mnt/{m.group(1).lower()}/" + m.group(2).replace("\\", "/")
+        d = m.group(1).lower()
+        root = Path(f"/mnt/{d}")
+        if not (root.is_dir() and any(root.iterdir())):      # not auto-mounted: a mapped network drive or a USB plugged in later
+            err = _drvfs_mount(f"{d.upper()}:", root)
+            if err:
+                st.session_state["path_note"] = f"drive {d.upper()}: is not visible inside the distro ({err}); copy the item into {HOPPER_WIN} instead"
+        return str(root / m.group(2).replace("\\", "/")) if m.group(2) else str(root)
+    m = re.match(r"^(?:\\\\|//)([^\\/]+)[\\/]+([^\\/]+)[\\/]?(.*)$", p)
+    if m:
+        server, share, rest = m.group(1), m.group(2), m.group(3).replace("\\", "/")
+        where = Path("/mnt/unc") / server.lower() / share.lower()
+        err = _drvfs_mount(f"\\\\{server}\\{share}", where)
+        if err:
+            st.session_state["path_note"] = (f"the share \\\\{server}\\{share} could not be opened from inside the distro ({err}). "
+                                             f"Map it to a drive letter in Windows (net use Z: \\\\{server}\\{share}) and paste Z:\\..., "
+                                             f"or copy the item into {HOPPER_WIN}")
+        return str(where / rest) if rest else str(where)
     return p
+
+
+HOPPER_WIN = r"C:\DFIR\hopper"
 
 
 def _logs(case_dir: Path) -> Path:
@@ -120,21 +151,23 @@ MILESTONES = {
 }
 
 
-def progress_of(case_dir: Path, step: str) -> tuple[int, str]:
-    """(percent, label) from the newest milestone in the step's log."""
-    log = _logs(case_dir) / f"{step}.log"
-    if not log.exists():
-        return 0, ""
-    text = log.read_text("utf-8", errors="replace")
-    # only the last run (logs are appended across runs)
+def progress_of_text(text: str, milestones: list[tuple[str, int, str]]) -> tuple[int, str]:
+    """(percent, label) from the newest milestone in a log text (last run only; logs are appended across runs)."""
     cut = text.rfind("] start:")
     text = text[cut:] if cut >= 0 else text
     best = (0, "")
-    for needle, pct, label in MILESTONES.get(step, []):
+    for needle, pct, label in milestones:
         pos = text.rfind(needle)
         if pos >= 0 and (pct >= best[0]):
             best = (pct, label)
     return best
+
+
+def progress_of(case_dir: Path, step: str) -> tuple[int, str]:
+    log = _logs(case_dir) / f"{step}.log"
+    if not log.exists():
+        return 0, ""
+    return progress_of_text(log.read_text("utf-8", errors="replace"), MILESTONES.get(step, []))
 
 
 def tail_log(case_dir: Path, step: str, lines: int = 60) -> str:
@@ -296,6 +329,13 @@ def render_sidebar_status(case):
             st.progress(min(max(pct, 1), 99) / 100, text=f"{STEPS[s][0]}: {label or 'running'} ({pct}%)")
             st.caption(f"started {started}")
     st.fragment(body, run_every="4s" if running else None)()
+
+
+def render_manual(root: Path, cases_root: Path, cfg: dict, compact: bool = True):
+    """The by-hand route: mount an image yourself, then create the case from it."""
+    with st.expander("Manual: mount an image yourself / create a case by hand (only when the hopper cannot do it)"):
+        render_mount(root)
+        render_new_case(cases_root, cfg, compact=compact)
 
 
 def render_run_tab(case, root: Path, cases_root: Path):
