@@ -38,6 +38,11 @@ USING IT (short version; docs\RUNBOOK.md in the gumshoe folder has the full dumm
     disks of one server (drive-scsi0, drive-scsi1, their hash files)
   - in the UI, Run tab -> Hopper: press Intake next to the item (or paste any path, including
     \\server\share\... and Z:\...). It mounts read-only, creates the case, hashes, runs Collect.
+  - Databases tab: every database on the evidence (data directories, .sql dumps, sqlite) as Excel-ready
+    CSV folders under the exports folder; search across all of them
+  - Players tab: who is in the data (every e-mail, phone, IP, wallet, card, hash... validated and
+    counted), merged into players over strong identifiers only, with timelines, linked/shared IPs,
+    wallets and money per player; look up any identifier; CSV folders + a dossier per player
   - Findings tab: filter, tick rows, Flag / Dismiss / notes, Export... (md/html/csv + the files)
   - or at the prompt:     wsl -d DFIR -u root   then   gumshoe --help
 
