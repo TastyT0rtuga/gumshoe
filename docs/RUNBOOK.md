@@ -151,6 +151,24 @@ vectors, translates all non-Latin findings with the 7B, and writes the triage/tr
 with 7B narrative. Progress is in `reports/deep-run.log`; the end state in `reports/deep-summary.json`.
 Next morning: `gumshoe ui` (fast model) to work through it; `ask --deep` when one answer deserves the 7B.
 
+### Databases: every table as CSV
+
+Databases tab (or `gumshoe db`). An intake scans the evidence and extracts what it finds by itself; for a
+case made by hand press **Scan the evidence**, then **Extract all picks** (every data directory, sqlite and
+Access file, the newest dump of each name) or pick rows. A `.sql`, `.sql.gz`, sqlite file or a whole
+MariaDB/MySQL data directory dropped into the hopper becomes a database-only case (no mounting, no tools).
+
+What comes out, under the exports folder (`<exports>\<case>\db\<source>\`, reachable from Windows):
+`<database>\<table>.csv` for every table (Excel-ready: UTF-8 with BOM, header row, NULL = empty cell,
+tables over 1,000,000 rows split into `.partNNN.csv`, binary values too big for a cell saved under
+`<table>.blobs\`), `tables.csv` (the index: rows per table, files), `schema.sql`, `README.txt`,
+`source.json` (what it was, its SHA-256, the server version and recovery level used).
+
+How: a data directory is never copied or written - a private MariaDB (or the bundled MySQL 8.0 engine for
+8.0 layouts) runs over an overlay, so crash recovery of a live-imaged server happens in the work folder,
+and every table is streamed out. Dumps are parsed straight to CSV (several processes on big plain files).
+Search every exported table from the tab (name, e-mail, phone, IP ...), case-insensitive, any script.
+
 ### Findings: read, mark, export
 
 Findings tab: filter by severity (pills), source, rule, free text and status; tick rows in the table

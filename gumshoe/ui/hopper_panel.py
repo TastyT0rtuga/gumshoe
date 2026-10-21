@@ -29,7 +29,9 @@ INTAKE_MILESTONES = [
     ("[intake] volumes in", 23, "looking for other volumes"), ("[intake] assembled", 24, "second volume mounted"),
     ("[intake] probe", 25, "looking at the file system"), ("[intake] case", 27, "case created"),
     ("[intake] verify", 28, "read-only check"), ("[intake] hashing", 29, "hashing the image(s)"), ("[intake] hashed", 40, "hashed"),
-    ("[intake] collect", 41, "starting the tools"), ("versions recorded", 42, "recording tool versions"),
+    ("[intake] databases", 41, "databases: scanning"), ("[db] extracting", 42, "databases: extracting"), ("[db] private server up", 44, "databases: private server up"),
+    ("[db] worker", 46, "databases: parsing a dump"), ("rows so far", 48, "databases: streaming tables"), ("[db] done", 50, "databases: done"),
+    ("[intake] collect", 51, "starting the tools"), ("versions recorded", 42, "recording tool versions"),
     ("running uac", 43, "UAC collecting artifacts"), ("uac done", 52, "UAC done"), ("running loki", 53, "Loki scanning for IOCs (the long step)"),
     ("loki done", 74, "Loki done"), ("running goaccess", 75, "GoAccess web statistics"), ("goaccess done", 77, "GoAccess done"),
     ("converting web and auth logs", 78, "Chainsaw + Sigma over the logs"), ("chainsaw done", 82, "Chainsaw done"),
@@ -71,7 +73,8 @@ def remembered_examiner(cases_root: Path) -> str:
     return windows_username() or ""
 
 
-def start_intake(root: Path, cases_root: Path, path: str, examiner: str, deep: bool, replace: bool, notes: str = "") -> dict:
+def start_intake(root: Path, cases_root: Path, path: str, examiner: str, deep: bool, replace: bool, notes: str = "",
+                 databases: bool = True, db_only: bool = False) -> dict:
     slug = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(path).name)[:40] or "item"
     job = f"{slug}-{time.strftime('%Y%m%d-%H%M%S')}"
     log = jobs_dir(cases_root) / f"{job}.log"
@@ -80,6 +83,10 @@ def start_intake(root: Path, cases_root: Path, path: str, examiner: str, deep: b
         cmd.append("--deep")
     if replace:
         cmd.append("--replace-mount")
+    if not databases:
+        cmd.append("--no-db")
+    if db_only:
+        cmd.append("--db-only")
     if notes:
         cmd += ["--notes", notes]
     wrapper = 'echo "[$(date -u +%FT%TZ)] start: $*"; "$@"; rc=$?; echo "[$(date -u +%FT%TZ)] finished with exit $rc"; exit $rc'
@@ -124,7 +131,7 @@ def any_job_running(cases_root: Path) -> bool:
 
 
 def _item_row(it: dict) -> str:
-    kind = {"disk": "disk image", "ewf": "E01 image", "vmdisk": "virtual disk", "archive": "archive", "split": "split image",
+    kind = {"disk": "disk image", "ewf": "E01 image", "vmdisk": "virtual disk", "archive": "archive", "split": "split image", "database": "database",
             "set": "folder of disk images", "tree": "folder of files", "unsupported": "cannot use", "unknown": "unknown", "missing": "missing"}.get(it["kind"], it["kind"])
     fmt = it.get("format", "")
     if it["kind"] == "archive":
@@ -174,6 +181,8 @@ def render_hopper(root: Path, cases_root: Path, cfg: dict, compact: bool = False
     ex = st.text_input("Examiner (goes on the case and every custody record)", value=remembered_examiner(cases_root), key="hopper_examiner")
     ex = ex.strip() or "examiner"
     c1, c2 = st.columns(2)
+    dbs = c1.checkbox("databases to CSV (every data directory, dump and sqlite file found; the data comes out first)", value=True, key="hopper_db")
+    db_only = c1.checkbox("only the databases - skip the triage tools (UAC, Loki, Chainsaw ...)", value=False, key="hopper_dbonly")
     deep = c1.checkbox("also run Deep afterwards (walk-away: documents, vectors, translations, report)", key="hopper_deep")
     mounted = mounted_now()
     replace = True
@@ -187,10 +196,10 @@ def render_hopper(root: Path, cases_root: Path, cfg: dict, compact: bool = False
                    "(folders of files can go ahead).")
 
     def intake_button(it: dict, key: str, label: str = "Intake") -> bool:
-        usable = it["kind"] in ("disk", "ewf", "vmdisk", "archive", "split", "set", "tree")
+        usable = it["kind"] in ("disk", "ewf", "vmdisk", "archive", "split", "set", "tree", "database")
         if not usable:
             return False
-        needs_mount = not (it["kind"] == "tree" or (it["kind"] == "archive" and it.get("contains") == "tree"))
+        needs_mount = not (it["kind"] in ("tree", "database") or (it["kind"] == "archive" and it.get("contains") == "tree"))
         why = ""
         if running:
             why = "an intake is already running"
@@ -218,7 +227,7 @@ def render_hopper(root: Path, cases_root: Path, cfg: dict, compact: bool = False
             cc1.caption(n)
         with cc2:
             if intake_button(it, f"intake_{i}"):
-                start_intake(root, cases_root, it["path"], ex, deep, replace)
+                start_intake(root, cases_root, it["path"], ex, deep, replace, databases=dbs, db_only=db_only)
                 st.rerun(scope="app")
     if st.button("Refresh the hopper"):
         st.rerun(scope="app")
@@ -237,10 +246,10 @@ def render_hopper(root: Path, cases_root: Path, cfg: dict, compact: bool = False
             st.markdown(_item_row(it))
             for n in it.get("notes", []):
                 st.caption(n)
-            if it["kind"] not in ("disk", "ewf", "vmdisk", "archive", "split", "set", "tree"):
+            if it["kind"] not in ("disk", "ewf", "vmdisk", "archive", "split", "set", "tree", "database"):
                 st.error("this item cannot be taken in: " + (it.get("format") or it["kind"]))
             elif intake_button(it, "intake_path", "Intake this path"):
-                start_intake(root, cases_root, wp, ex, deep, replace)
+                start_intake(root, cases_root, wp, ex, deep, replace, databases=dbs, db_only=db_only)
                 st.rerun(scope="app")
         else:
             st.error(f"not found inside the distro: `{wp}`")

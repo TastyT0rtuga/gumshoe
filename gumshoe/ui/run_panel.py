@@ -23,6 +23,8 @@ STEPS = {
                 lambda c: ["deep"]),
     "reanalyze": ("Re-analyze", "redo the database review and the analysis of what Collect already gathered, without re-running the tools (minutes)",
                 lambda c: ["collect", "--normalize-only", "--db"]),
+    "databases": ("Databases to CSV", "find every database on the evidence (data directories, dumps, sqlite) and export the tables as CSV folders (minutes to hours)",
+                lambda c: ["db", "extract"]),
 }
 
 
@@ -116,6 +118,9 @@ MILESTONES = {
                 ("finished with exit", 100, "done")],
     "reanalyze": [("start:", 5, "starting"), ("[dbreview] copying", 10, "MariaDB review: copying the datadir"),
                   ("[dbreview]", 30, "MariaDB review"), ("[normalize]", 60, "normalizing"), ("correlating", 90, "correlating"),
+                  ("finished with exit", 100, "done")],
+    "databases": [("start:", 2, "starting"), ("[db] scan", 4, "scanning"), ("[db] extracting", 8, "extracting"), ("[db] private server up", 18, "private server up"),
+                  ("[db] worker", 30, "parsing the dump"), ("rows so far", 40, "streaming tables"), ("[db] [", 45, "tables"), ("[db] done", 98, "finishing"),
                   ("finished with exit", 100, "done")],
     "deep":    [("start:", 2, "starting"), ("running uac", 4, "UAC"), ("running loki", 8, "Loki (intense)"), ("loki done", 40, "Loki done"),
                 ("chainsaw done", 48, "Chainsaw done"), ("[dbreview]", 50, "MariaDB review"), ("[normalize]", 58, "normalizing"),

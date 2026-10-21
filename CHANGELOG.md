@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Databases to CSV** (`gumshoe db scan|extract|list|search`, the Databases tab, a stage of every intake):
+  MariaDB/MySQL data directories are opened by a private server over an **overlay** (the evidence stays
+  read-only, the server's writes - crash recovery - land in the work folder; a 100 GB datadir is not
+  copied), every table is streamed to CSV; MySQL 8.0 data directories use a bundled, unpacked MySQL 8.0
+  engine (`/opt/dfir/mysql8`); SQL dumps (mysqldump/phpMyAdmin, plain or gz/xz/bz2/zip) are parsed directly
+  and in parallel for big plain files; PostgreSQL plain dumps, SQLite files and Access files too. Output:
+  one folder per source in the exports folder, one per database, one CSV per table (UTF-8 BOM, CRLF,
+  1,000,000 rows per file, NULL empty, blobs to files), `tables.csv`, `schema.sql`, `README.txt`,
+  `source.json` with the source hash; search across every exported CSV. Dumps/datadirs dropped in the
+  hopper become database-only cases. The DB review no longer copies the datadir.
 - Folders are settings (`gumshoe settings`, Hopper → Folders in the UI, stored in
   `/opt/dfir/gumshoe-settings.json`): the hopper, the work folder for extracted images/trees and the
   exports folder can live on any drive or share, each shown with its free space. The examiner name is

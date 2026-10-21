@@ -66,7 +66,7 @@ with st.sidebar:
         pins = read_pins(case)
         st.caption("pinned findings: " + (", ".join(pins) if pins else "none"))
 
-tabs = st.tabs(["Run", "Findings", "Ask", "Documents", "Browse", "Panel", "Trends", "Timeline", "Reports", "Evidence", "Export", "Custody"])
+tabs = st.tabs(["Run", "Databases", "Findings", "Ask", "Documents", "Browse", "Panel", "Trends", "Timeline", "Reports", "Evidence", "Export", "Custody"])
 findings = case.read_findings()
 if "export_set" not in st.session_state:
     st.session_state.export_set = {}
@@ -112,10 +112,14 @@ with tabs[0]:
     render_run_tab(case, ROOT, CASES)
 
 with tabs[1]:
+    from gumshoe.ui.db_panel import render_db_tab
+    render_db_tab(case, ROOT, CASES)
+
+with tabs[2]:
     from gumshoe.ui.findings_panel import render_findings_tab
     render_findings_tab(case, findings, show_preview, CASES)
 
-with tabs[2]:
+with tabs[3]:
     st.caption("Answers come only from indexed sources and must cite them; citations outside the retrieved set are removed. "
                "Cited files are archived automatically.")
     from gumshoe.memory import read_session, clear_session, list_sessions, read_notes
@@ -176,7 +180,7 @@ with tabs[2]:
                 d = json.loads(line)
                 st.markdown(f"- {d['asked_at']} — {d['question']} → {'answered' if d.get('answer') else 'no model'}")
 
-with tabs[3]:
+with tabs[4]:
     doc = case.read_json("documents.json", {}) or {}
     items = doc.get("items", [])
     if not items:
@@ -194,7 +198,7 @@ with tabs[3]:
             pick = st.selectbox("Open", [i["path"] for i in rows])
             show_preview(pick, "doc" + str(abs(hash(pick))))
 
-with tabs[4]:
+with tabs[5]:
     from gumshoe.integrity import stat_times
     st.caption("Every file on the image, read-only. Open anything; viewing or downloading archives it and logs it.")
     if "browse_path" not in st.session_state:
@@ -211,7 +215,7 @@ with tabs[4]:
         for p in sorted(base.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower()))[:3000]:
             try:
                 s = stat_times(p)
-                entries.append({"name": p.name + ("/" if p.is_dir() else ""), "size": s["size"] if p.is_file() else "", "mtime": s["mtime"],
+                entries.append({"name": p.name + ("/" if p.is_dir() else ""), "size": str(s["size"]) if p.is_file() else "", "mtime": s["mtime"],
                                 "ctime": s["ctime"], "mode": s["mode"]})
             except OSError:
                 continue
@@ -229,7 +233,7 @@ with tabs[4]:
             st.session_state.export_set[st.session_state.browse_path] = "directory from browser"
             st.success(f"export set: {len(st.session_state.export_set)} entries (directories export every file under them)")
 
-with tabs[5]:
+with tabs[6]:
     inv = case.read_json("inventory.json", {}) or {}
     aa = inv.get("aapanel") or {}
     if not aa.get("present"):
@@ -318,7 +322,7 @@ with tabs[5]:
             for i in ini:
                 st.json({i["file"]: i["facts"]})
 
-with tabs[6]:
+with tabs[7]:
     trends = case.read_json("trends.json", {}) or {}
     inv = case.read_json("inventory.json", {}) or {}
     for site, s in (trends.get("sites") or {}).items():
@@ -346,7 +350,7 @@ with tabs[6]:
     if not trends and not auth:
         st.info("No trends yet: run `gumshoe collect` with GoAccess and the auth converter.")
 
-with tabs[7]:
+with tabs[8]:
     import sqlite3
     tldb = case.collected / "timeline.db"
     bursts = case.read_json("bursts.json", []) or []
@@ -385,7 +389,7 @@ with tabs[7]:
     else:
         st.info("No timeline yet (UAC bodyfile not normalized).")
 
-with tabs[8]:
+with tabs[9]:
     kind = st.selectbox("Report", ["triage", "trends", "ioc"])
     use_llm = st.checkbox("Include AI narrative sections (labelled, cited, 7B model)", value=False)
     if st.button("Generate"):
@@ -401,7 +405,7 @@ with tabs[8]:
                 st.download_button("download HTML", h.read_bytes(), file_name=h.name, key="dlh" + p.name)
             st.markdown(p.read_text("utf-8")[:20000])
 
-with tabs[9]:
+with tabs[10]:
     mp = case.evidence / "manifest.json"
     if mp.exists():
         m = json.loads(mp.read_text("utf-8"))
@@ -413,7 +417,7 @@ with tabs[9]:
     else:
         st.info("Nothing archived yet. Cited sources and high/critical findings are archived automatically.")
 
-with tabs[10]:
+with tabs[11]:
     es = st.session_state.export_set
     st.caption("Files added from findings, answers or the document viewer. Building copies the originals (tree preserved) with a "
                "hashed manifest and a zip, and logs it.")
@@ -443,7 +447,7 @@ with tabs[10]:
             extra = " · " + ", ".join(fn for fn in ("findings.md", "findings.html", "findings.csv") if (d / fn).exists()) if d.is_dir() else ""
             st.download_button(zp.name + extra, zp.read_bytes(), file_name=zp.name, key="pz" + zp.name)
 
-with tabs[11]:
+with tabs[12]:
     st.markdown(("✅ " if ok_chain else "❌ ") + chain_msg)
     recs = case.custody.tail(200)
     st.dataframe(pd.DataFrame([{"seq": r.seq, "ts": r.ts, "action": r.action, "details": json.dumps(r.details, default=str)[:200]} for r in recs]),

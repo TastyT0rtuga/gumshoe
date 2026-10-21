@@ -110,6 +110,7 @@ exec "$DEST/venv/bin/python" "$DEST/gumshoe/gumshoe.py" "\$@"
 EOF
 chmod +x "$DEST/bin/gumshoe"; ln -sfn "$DEST/bin/gumshoe" /usr/local/bin/gumshoe
 ln -sfn "$DEST/gumshoe/setup/wsl/mount_image.sh" /usr/local/bin/mount_image 2>/dev/null || true
+bash "$DEST/gumshoe/setup/offline/wsl_update.sh" "$B" 2>&1 | tail -3 || true     # extras: 7zip/afflib, the MySQL 8 engine, folders
 date -u +"%Y-%m-%dT%H:%M:%SZ" > "$DEST/.provisioned"
 echo
 echo "provisioned: $DEST  (log: $LOG)"

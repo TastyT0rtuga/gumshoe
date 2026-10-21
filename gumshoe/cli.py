@@ -224,7 +224,7 @@ def cmd_intake(args):
         sys.exit("--examiner is required (or set examiner: in config.yaml)")
     it = Intake(Path(args.cases_root), cfg, examiner)
     case = it.run(Path(args.path), case_id=args.case or None, deep=args.deep, replace_mount=args.replace_mount,
-                  hash_images=not args.no_hash, notes=args.notes or "")
+                  hash_images=not args.no_hash, notes=args.notes or "", databases=not args.no_db, collect=not args.db_only)
     print(json.dumps({"case": case.meta.get("case_id"), "mode": case.mode, "root": str(case.mount_root)}, indent=2))
 
 
@@ -245,6 +245,66 @@ def cmd_hopper(args):
         print(f"{it['name']:50.50s} {it['kind']:10s} {human(it.get('size', 0)):>10s}  {it.get('format', '')}")
         for n in it.get("notes", []):
             print(f"{'':50s} {n}")
+
+
+def cmd_db(args):
+    """Databases: scan the evidence for them, extract any of them to CSV folders, search the CSVs."""
+    from . import dbexport
+    c = _case(args)
+    if args.db_cmd == "scan":
+        root = Path(args.root) if args.root else c.mount_root
+        src = dbexport.find_sources(root, print)
+        c.write_json("db_sources.json", {"root": str(root), "scanned": __import__("gumshoe.integrity", fromlist=["utc_now"]).utc_now(), "sources": src})
+        for s_ in src:
+            print(f"{s_['kind']:16s} {dbexport.human(s_.get('size', 0)):>10s}  {s_['rel']}" + (f"  databases: {', '.join(s_['databases'][:8])}" if s_.get("databases") else ""))
+        if not src:
+            print("no databases found under", root)
+        return
+    if args.db_cmd == "list":
+        for e in dbexport.list_exports(c):
+            print(f"{e['name']:40s} {e.get('kind', ''):14s} tables {e.get('tables_total', '?'):>5} rows {e.get('rows_total', '?'):>10}  -> {e.get('out', '')}" +
+                  (f"  ERROR {e['error']}" if e.get("error") else ""))
+        return
+    if args.db_cmd == "search":
+        for h in dbexport.search(c, args.text, max_hits=args.max):
+            print(f"{h['export']}/{h['database']}/{h['table']}:{h['line']}: {h['text'][:200]}")
+        return
+    # extract
+    from .settings import work_dir
+    work, note = work_dir(Path(args.cases_root))
+    if note:
+        print("note:", note)
+    sources = []
+    if args.path:
+        p_ = Path(args.path)
+        if p_.is_dir() and dbexport.is_datadir(p_):
+            from .dbengine import datadir_flavour
+            fl = datadir_flavour(p_)
+            sources = [{"kind": "mysql8-datadir" if fl.get("mysql8") else "mariadb-datadir", "path": str(p_), "size": 0, "rel": p_.name, "databases": fl.get("databases", [])}]
+        elif p_.is_file():
+            cl = dbexport.classify_file(p_)
+            if not cl:
+                sys.exit(f"not a database I recognise: {p_}")
+            cl["rel"] = p_.name
+            sources = [cl]
+        else:
+            sys.exit(f"not a database file or data directory: {p_}")
+    else:
+        saved = c.read_json("db_sources.json", {}) or {}
+        sources = saved.get("sources") or dbexport.find_sources(c.mount_root, print)
+        if args.index:
+            want = {int(i) for i in args.index.split(",")}
+            sources = [s_ for i, s_ in enumerate(sources) if i in want]
+        elif not args.all:
+            sources = dbexport.auto_pick(sources)
+    if not sources:
+        sys.exit("nothing to extract (run `gumshoe db scan` first, or give a path)")
+    for s_ in sources:
+        try:
+            r = dbexport.extract(c, s_, work, print)
+            print(json.dumps({k: r.get(k) for k in ("name", "kind", "tables_total", "rows_total", "out", "seconds", "server_version", "force_recovery")}, indent=2))
+        except Exception as e:  # noqa: BLE001 - keep going with the next source
+            print(f"[db] {s_.get('rel') or s_.get('path')}: FAILED {type(e).__name__}: {e}")
 
 
 def cmd_settings(args):
@@ -456,8 +516,17 @@ def main(argv=None):
     s.add_argument("--deep", action="store_true", help="run the deep stage after collect")
     s.add_argument("--replace-mount", action="store_true", help="unmount whatever is mounted now first")
     s.add_argument("--no-hash", action="store_true", help="skip hashing the images (not recommended)")
+    s.add_argument("--no-db", action="store_true", help="do not extract databases found on the evidence")
+    s.add_argument("--db-only", action="store_true", help="databases to CSV only; skip the triage tools")
     s = sub.add_parser("hopper", help="list what is in the hopper folder and what each item is"); s.set_defaults(fn=cmd_hopper)
     s.add_argument("--path", help="folder to scan (default C:\\DFIR\\hopper = /mnt/c/DFIR/hopper)"); s.add_argument("--json", action="store_true")
+    s = sub.add_parser("db", help="databases on the evidence -> CSV folders (scan / extract / list / search)"); s.set_defaults(fn=cmd_db)
+    dsub = s.add_subparsers(dest="db_cmd", required=True)
+    d = dsub.add_parser("scan", help="find data directories, SQL dumps, sqlite and Access files on the evidence"); d.add_argument("--root")
+    d = dsub.add_parser("extract", help="extract to CSV: the scan's picks, --all, --index 0,2, or a path (datadir, .sql, .sql.gz, sqlite)")
+    d.add_argument("path", nargs="?"); d.add_argument("--all", action="store_true"); d.add_argument("--index")
+    d = dsub.add_parser("list", help="what has been extracted")
+    d = dsub.add_parser("search", help="search every exported CSV"); d.add_argument("text"); d.add_argument("--max", type=int, default=500)
     s = sub.add_parser("settings", help="show or set the hopper / work / exports folders and the examiner name"); s.set_defaults(fn=cmd_settings)
     s.add_argument("--hopper"); s.add_argument("--work"); s.add_argument("--exports"); s.add_argument("--examiner")
     s = sub.add_parser("remount", help="after a reboot: mount a case's evidence again as intake did"); s.set_defaults(fn=cmd_remount)

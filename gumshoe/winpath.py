@@ -37,11 +37,7 @@ def to_wsl(p: str, readonly: bool = False) -> tuple[str, str]:
     if m:
         d = m.group(1).lower()
         root = Path(f"/mnt/{d}")
-        try:
-            empty = not (root.is_dir() and any(root.iterdir()))
-        except OSError:
-            empty = True
-        if empty:                      # not auto-mounted: a mapped network drive or a disk plugged in later
+        if not os.path.ismount(root):          # not auto-mounted: a mapped network drive or a disk plugged in later
             err = drvfs_mount(f"{d.upper()}:", root, readonly)
             if err:
                 note = f"drive {d.upper()}: is not visible inside the distro ({err})"

@@ -1,9 +1,9 @@
-"""MariaDB review on a copy of the datadir (inside WSL).
+"""MariaDB review through a private server (inside WSL).
 
 The InnoDB/Aria files in the datadir cannot be parsed safely without the
-engine, so this copies the datadir into the case directory, starts a private
-mariadbd on the COPY (unix socket, --skip-networking --skip-grant-tables),
-runs a fixed set of queries into static JSON, and stops it.
+engine, so a private mariadbd is started over the datadir (an overlay: the
+evidence stays read-only, the server's writes land in the case's work folder;
+see dbengine.py), a fixed set of queries runs into static JSON, and it stops.
 
 Server images are almost never cleanly shut down, so the redo log is dirty and
 InnoDB must run crash recovery; that is impossible under --innodb-read-only, so
@@ -153,139 +153,35 @@ def review(case, log=print) -> list[Finding]:
                                 title="mariadbd/mariadb not on PATH; table review skipped (run inside the WSL distro)"))
         case.write_json("dbreview.json", results)
         return findings
-    # ---- copy datadir into the case directory ---------------------------------------------
-    work = case.collected / "dbcopy"
-    sock = work / "mariadb.sock"
-    if not (work / "data").exists():
-        dbcfg = case.cfg.get("dbreview", {}) or {}
-        cap = int(float(dbcfg.get("max_copy_gb", 20)) * 2**30)
-        wanted = set(dbcfg.get("databases") or [])
-        # size per top-level entry: system files + mysql/ schema are always needed; app databases are optional
-        entries = {}
-        for e in datadir.iterdir():
-            entries[e.name] = sum(p.stat().st_size for p in e.rglob("*") if p.is_file()) if e.is_dir() else e.stat().st_size
-        total = sum(entries.values())
-        system = {n for n, _ in entries.items() if not (datadir / n).is_dir() or n in ("mysql", "performance_schema", "sys")}
-        per_table = any(True for _ in datadir.rglob("*.ibd"))
-        if total <= cap:
-            chosen = set(entries)
-        else:
-            chosen = system | {n for n in entries if n in wanted}
-            if not per_table:
-                findings.append(Finding(source="dbreview", severity="info", rule="db.shared_tablespace",
-                                        title="MariaDB datadir uses a shared tablespace (no .ibd files); a partial copy cannot work",
-                                        description=f"Datadir is {total // 2**30} GB, above dbreview.max_copy_gb={cap // 2**30}. Raise the cap or "
-                                                    "review the database on a larger host."))
-                case.write_json("dbreview.json", results)
-                return findings
-            skipped = sorted(set(entries) - chosen)
-            findings.append(Finding(source="dbreview", severity="info", rule="db.partial_copy",
-                                    title=f"MariaDB datadir is {total // 2**30} GB; only the system schema and {len(chosen - system)} named database(s) were copied",
-                                    description="Add databases to dbreview.databases in config.yaml and re-run `gumshoe dbreview` to include: " +
-                                                ", ".join(skipped[:40])))
-        size = sum(entries[n] for n in chosen)
-        free = shutil.disk_usage(case.dir).free
-        if size * 1.1 > free:
-            findings.append(Finding(source="dbreview", severity="info", rule="db.no_space",
-                                    title=f"MariaDB review skipped: copy needs {size // 2**20} MB, only {free // 2**20} MB free in the case directory"))
-            case.write_json("dbreview.json", results)
-            return findings
-        log(f"[dbreview] copying {len(chosen)} entries ({size // 2**20} MB) from {datadir} -> {work / 'data'} (this can take a while)")
-        (work / "data").mkdir(parents=True, exist_ok=True)
-
-        def _special(path: Path) -> bool:
-            """sockets, FIFOs and device nodes: a datadir imaged from a running server has mysql.sock in it"""
-            try:
-                m = path.lstat().st_mode
-            except OSError:
-                return True
-            return not (stat.S_ISREG(m) or stat.S_ISDIR(m) or stat.S_ISLNK(m))
-
-        def _ignore(dirpath, names):
-            return [n for n in names if _special(Path(dirpath) / n)]
-
-        skipped: list[str] = []
-        copied: list[str] = []
-        for n in sorted(chosen):
-            src = datadir / n
-            try:
-                if _special(src):
-                    skipped.append(n); continue
-                if src.is_dir():
-                    shutil.copytree(src, work / "data" / n, symlinks=False, ignore=_ignore, ignore_dangling_symlinks=True)
-                elif src.is_file():
-                    shutil.copy2(src, work / "data" / n)
-                else:
-                    skipped.append(n); continue
-                copied.append(n)
-            except OSError as e:
-                skipped.append(f"{n} ({e.strerror or e})")
-                log(f"[dbreview] could not copy {n}: {e}")
-        if skipped:
-            log(f"[dbreview] skipped {len(skipped)} special or unreadable entries: {', '.join(skipped[:10])}")
-        results["copied"] = copied
-        results["skipped"] = skipped
-        case.custody.append("db_datadir_copied", {"from": case.rel(datadir), "to": str((work / "data").relative_to(case.dir)),
-                                                  "bytes": size, "entries": copied, "skipped": skipped,
-                                                  "note": "crash recovery will run on this copy, never on the evidence"})
-    err = work / "mariadbd.err"
-    (work / "tmp").mkdir(exist_ok=True)
-
-    def _start(level: int) -> subprocess.Popen:
-        cmd = ["mariadbd", "--no-defaults", f"--datadir={work / 'data'}", f"--socket={sock}", "--skip-networking",
-               "--skip-grant-tables", "--skip-log-bin", f"--log-error={err}", f"--pid-file={work / 'mariadbd.pid'}",
-               f"--tmpdir={work / 'tmp'}", "--innodb-buffer-pool-size=256M", f"--innodb-force-recovery={level}",
-               "--skip-slave-start", "--event-scheduler=OFF", "--skip-name-resolve"]
-        if hasattr(os, "geteuid") and os.geteuid() == 0:
-            cmd.append("--user=root")      # mariadbd refuses to run as root otherwise (the UI runs as root in WSL)
-        # anything it says before the error log is open (e.g. the root refusal) goes to the same file
-        with open(err, "ab") as errf:
-            p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=errf)
-        case.custody.append("db_server_started", {"cmd": cmd, "force_recovery": level})
-        return p
-
-    def _wait(p: subprocess.Popen, seconds: int = 180) -> bool:
-        for _ in range(seconds):
-            if p.poll() is not None:
-                return False
-            if sock.exists():
-                try:
-                    _mysql(sock, "SELECT 1")
-                    return True
-                except Exception:
-                    pass
-            time.sleep(1)
-        return False
-
-    proc = None
-    used_level = None
-    for level in (0, 1, 3, 4):
-        if sock.exists():
-            try:
-                sock.unlink()
-            except OSError:
-                pass
-        proc = _start(level)
-        if _wait(proc):
-            used_level = level
-            break
-        proc.terminate()
-        try:
-            proc.wait(timeout=30)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-        log(f"[dbreview] mariadbd did not start with innodb_force_recovery={level}; see {err}")
-    results["innodb_force_recovery"] = used_level
-    if used_level is None:
-        findings.append(Finding(source="dbreview", severity="info", rule="db.start_failed",
-                                title="MariaDB review failed: server would not start on the copy at any recovery level",
-                                description=f"See {err}. The datadir copy is kept for manual work."))
+    # ---- a private server over the datadir (overlay: no copy; see dbengine) ------------------
+    from .dbengine import PrivateMariaDB, datadir_flavour
+    fl = datadir_flavour(datadir)
+    from .dbengine import mysql8_available
+    if fl.get("mysql8") and not mysql8_available():
+        findings.append(Finding(source="dbreview", severity="info", rule="db.mysql8",
+                                title="MySQL 8.0 data directory and the MySQL 8.0 engine is not unpacked in this distro; table review skipped",
+                                description="Run Gumshoe.bat once with a bundle that carries the mysql-server-core-8.0 debs (unpacked to /opt/dfir/mysql8). "
+                                            "The static inventory above still applies.", path=results["datadir"]))
         case.write_json("dbreview.json", results)
         return findings
+    work = case.collected / "dbwork"
+    try:
+        srv = PrivateMariaDB(datadir, work, log, case.custody).__enter__()
+    except Exception as e:  # noqa: BLE001
+        findings.append(Finding(source="dbreview", severity="info", rule="db.start_failed",
+                                title="MariaDB review failed: the private server would not start on this datadir",
+                                description=f"{type(e).__name__}: {str(e)[:600]}", path=results["datadir"]))
+        results["start_error"] = str(e)[:600]
+        case.write_json("dbreview.json", results)
+        return findings
+    sock = srv.sock
+    used_level = srv.level
+    results["innodb_force_recovery"] = used_level
+    results["mode"] = srv.mode
     if used_level:
         findings.append(Finding(source="dbreview", severity="info", rule="db.recovery_level",
-                                title=f"MariaDB copy needed innodb_force_recovery={used_level} to start (dirty shutdown in the image)",
-                                description="Recovery ran on the case copy only. Levels 3-4 skip transaction rollback/undo; row data "
+                                title=f"MariaDB needed innodb_force_recovery={used_level} to start (dirty shutdown in the image)",
+                                description="Recovery ran in the overlay/copy only. Levels 3-4 skip transaction rollback/undo; row data "
                                             "from uncommitted transactions may be absent."))
     errors: list[str] = []
 
@@ -375,12 +271,7 @@ def review(case, log=print) -> list[Finding]:
             findings.append(Finding(source="dbreview", severity="info", rule="db.partial",
                                     title=f"MariaDB review completed with {len(errors)} query error(s)", description="; ".join(errors)[:800]))
     finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=60)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-        case.custody.append("db_server_stopped", {})
+        srv.close()
     results["finished"] = time.time()
     case.write_json("dbreview.json", results)
     return findings

@@ -208,6 +208,13 @@ def sniff(path: Path) -> dict[str, Any]:
         info["kind"] = "missing"
         return info
     info["size"] = path.stat().st_size
+    from .dbexport import classify_file
+    cl = classify_file(path)
+    if cl:                                   # a SQL dump (plain or compressed), an sqlite file, an Access file
+        info.update({"kind": "database", "db_kind": cl["kind"], "format": {"mysql-dump": "MySQL/MariaDB SQL dump", "pg-dump": "PostgreSQL SQL dump",
+                                                                              "sqlite": "SQLite database", "access": "Microsoft Access database"}.get(cl["kind"], cl["kind"])})
+        info["notes"].append("goes straight to CSV folders (every table), no disk mounting involved")
+        return info
     head = _head(path)
     s = sniff_bytes(head)
     info.update(s)
@@ -298,6 +305,17 @@ def _sniff_dir(path: Path, info: dict[str, Any]) -> dict[str, Any]:
         info["kind"] = "unsupported"
         info["format"] = f"cannot read folder: {e}"
         return info
+    from .dbexport import is_datadir
+    if is_datadir(path):
+        from .dbengine import datadir_flavour
+        fl = datadir_flavour(path)
+        info["kind"] = "database"
+        info["db_kind"] = "mysql8-datadir" if fl.get("mysql8") else "mariadb-datadir"
+        info["format"] = ("MySQL 8.0" if fl.get("mysql8") else "MariaDB/MySQL") + " data directory" + (f": {', '.join(fl.get('databases', [])[:6])}" if fl.get("databases") else "")
+        info["notes"].append("a private server is started over it (read-only overlay) and every table goes to CSV")
+        if fl.get("mysql8"):
+            info["notes"].append("MySQL 8.0 layout: the bundled MariaDB engine cannot open it")
+        return info
     if any((path / h).is_file() for h in _ROOTFS_HINTS):
         info["kind"] = "tree"
         info["format"] = "Linux root file system (extracted)"
@@ -381,8 +399,9 @@ def human(n: float) -> str:
 
 
 def safe_case_id(name: str) -> str:
-    base = re.sub(r"\.(zip|7z|gz|tgz|xz|txz|bz2|tbz2|tar|raw|dd|img|e01|ex01|vhdx|vhd|vmdk|qcow2|vdi|001)$", "", name, flags=re.I)
-    base = re.sub(r"\.(tar|raw|dd|img)$", "", base, flags=re.I)
+    base = name
+    for _ in range(3):      # backup.sql.gz -> backup; disk.raw.zip -> disk
+        base = re.sub(r"\.(zip|7z|gz|tgz|xz|txz|bz2|tbz2|tar|raw|dd|img|e01|ex01|vhdx|vhd|vmdk|qcow2|vdi|001|sql|dump|sqlite|sqlite3|db|mdb|accdb)$", "", base, flags=re.I)
     base = re.sub(r"[^A-Za-z0-9._-]+", "-", base).strip("-._") or "case"
     return base[:48]
 
@@ -755,7 +774,7 @@ class Intake:
         self.record: dict[str, Any] = {"images": [], "volumes": [], "steps": [], "work": str(self.work)}
 
     def run(self, path: Path, case_id: Optional[str] = None, deep: bool = False, replace_mount: bool = False,
-            hash_images: bool = True, notes: str = "") -> Case:
+            hash_images: bool = True, notes: str = "", databases: bool = True, collect: bool = True) -> Case:
         t0 = time.time()
         path = Path(path)
         item = sniff(path)
@@ -769,7 +788,12 @@ class Intake:
         case_id = case_id or unique_case_id(self.cases_root, base)
 
         mode, mount_root, image_path = "mount", DEFAULT_TARGET, None
-        if item["kind"] == "tree" or (item["kind"] == "archive" and item.get("contains") == "tree"):
+        db_item = None
+        if item["kind"] == "database":
+            src = Path(item["path"])
+            mode, mount_root = "export", str(src if src.is_dir() else src.parent)
+            db_item = {"kind": item["db_kind"], "path": str(src), "size": item["size"], "rel": src.name}
+        elif item["kind"] == "tree" or (item["kind"] == "archive" and item.get("contains") == "tree"):
             root = Path(item["path"]) if item["kind"] == "tree" else extract_tree(item, self.log, self.work)
             mode, mount_root = "export", str(root)
         else:
@@ -784,11 +808,13 @@ class Intake:
             # /home, /www, /var/lib/mysql ... on another LV of the same disk or on a second disk: put them in place
             self.record["volumes"] = assemble(Path(DEFAULT_TARGET), root_image, images, self.log)
         from .probe import probe, explain
-        pr = probe(Path(mount_root), self.cfg["paths"]["panel"].strip("/"))
-        self.log("[intake] probe: " + explain(pr, self.cfg["paths"]["panel"]))
-        self.record["probe"] = {k: pr.get(k) for k in ("is_rootfs", "os", "hostname", "panel", "www_empty", "separate_volumes", "other_panels", "mysql_datadirs", "web_roots")}
-
-        note = (notes + "\n" if notes else "") + f"intake of {item['path']} ({item['kind']} {item.get('format', '')}); " + explain(pr, self.cfg["paths"]["panel"])
+        if db_item is None:
+            pr = probe(Path(mount_root), self.cfg["paths"]["panel"].strip("/"))
+            self.log("[intake] probe: " + explain(pr, self.cfg["paths"]["panel"]))
+            self.record["probe"] = {k: pr.get(k) for k in ("is_rootfs", "os", "hostname", "panel", "www_empty", "separate_volumes", "other_panels", "mysql_datadirs", "web_roots")}
+            note = (notes + "\n" if notes else "") + f"intake of {item['path']} ({item['kind']} {item.get('format', '')}); " + explain(pr, self.cfg["paths"]["panel"])
+        else:
+            note = (notes + "\n" if notes else "") + f"intake of {item['path']} ({item.get('format', '')}): database export only"
         case = Case.create(self.cases_root, case_id, self.examiner, image_path, mount_root, mode, self.cfg, notes=note)
         self.log(f"[intake] case {case_id} created (mode {mode}, root {mount_root})")
         self.record["case_id"] = case_id
@@ -834,11 +860,37 @@ class Intake:
                 self.record.setdefault("hashes", {})[str(img)] = {"computed": comp, "expected": exp, "match": r.get("match")}
             self._save(case)
 
+        # databases first: the data is what the examiner is waiting for
+        if db_item is not None:
+            from . import dbexport
+            self.log(f"[intake] databases: extracting {db_item['kind']} {src.name}")
+            r = dbexport.extract(case, db_item, self.work, self.log)
+            self.record["databases"] = [{k: r.get(k) for k in ("name", "kind", "tables_total", "rows_total", "out", "server_version", "force_recovery", "error")}]
+            self._save(case)
+            collect = False
+        elif databases:
+            from . import dbexport
+            self.log("[intake] databases: scanning the evidence for data directories, dumps, sqlite files")
+            found = dbexport.find_sources(case.mount_root, self.log)
+            case.write_json("db_sources.json", {"root": str(case.mount_root), "scanned": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "sources": found})
+            picks = dbexport.auto_pick(found)
+            self.log(f"[intake] databases: {len(found)} found, extracting {len(picks)}" + (": " + ", ".join(p_['rel'] for p_ in picks[:6]) if picks else ""))
+            self.record["databases"] = []
+            for p_ in picks:
+                try:
+                    r = dbexport.extract(case, p_, self.work, self.log)
+                    self.record["databases"].append({k: r.get(k) for k in ("name", "kind", "tables_total", "rows_total", "out", "server_version", "force_recovery")})
+                except Exception as e:  # noqa: BLE001 - one database must not stop the intake
+                    self.log(f"[intake] databases: {p_['rel']} failed: {type(e).__name__}: {e}")
+                    self.record["databases"].append({"name": p_.get("rel"), "kind": p_["kind"], "error": f"{type(e).__name__}: {e}"[:300]})
+                self._save(case)
+
         # collect
-        self.log("[intake] collect: starting the tools")
-        from .collect import collect_case
-        collect_case(case, db=True, log=self.log)
-        self._save(case)
+        if collect:
+            self.log("[intake] collect: starting the tools")
+            from .collect import collect_case
+            collect_case(case, db=True, log=self.log)
+            self._save(case)
         if deep:
             self.log("[intake] deep: starting")
             from .deep import run as deep_run
@@ -846,8 +898,11 @@ class Intake:
         s = case.read_json("summary.json", {}) or {}
         inv = case.read_json("inventory.json", {}) or {}
         aa = inv.get("aapanel") or {}
-        self.log(f"[intake] done: case {case_id} in {(time.time() - t0) / 60:.0f} min - {s.get('total', 0)} findings; "
-                 f"aaPanel {'found at ' + aa.get('path', '/www/server/panel') if aa.get('present') else 'not found'}")
+        dbs = self.record.get("databases") or []
+        dbtxt = (f"{len([d for d in dbs if not d.get('error')])} database source(s) -> {sum(d.get('tables_total') or 0 for d in dbs)} tables, "
+                 f"{sum(d.get('rows_total') or 0 for d in dbs)} rows as CSV") if dbs else "no databases"
+        self.log(f"[intake] done: case {case_id} in {(time.time() - t0) / 60:.0f} min - {dbtxt}; {s.get('total', 0)} findings" +
+                 (f"; aaPanel {'found at ' + aa.get('path', '/www/server/panel') if aa.get('present') else 'not found'}" if collect else ""))
         return case
 
     # -- pieces
