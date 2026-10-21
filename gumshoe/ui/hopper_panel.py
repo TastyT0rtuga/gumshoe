@@ -31,7 +31,7 @@ INTAKE_MILESTONES = [
     ("[intake] verify", 28, "read-only check"), ("[intake] hashing", 29, "hashing the image(s)"), ("[intake] hashed", 40, "hashed"),
     ("[intake] databases", 41, "databases: scanning"), ("[db] extracting", 42, "databases: extracting"), ("[db] private server up", 44, "databases: private server up"),
     ("[db] worker", 46, "databases: parsing a dump"), ("rows so far", 48, "databases: streaming tables"), ("[db] done", 50, "databases: done"),
-    ("[intake] collect", 51, "starting the tools"), ("versions recorded", 42, "recording tool versions"),
+    ("[intake] collect", 51, "starting the tools"), ("[intake] players", 95, "building the players graph"), ("versions recorded", 42, "recording tool versions"),
     ("running uac", 43, "UAC collecting artifacts"), ("uac done", 52, "UAC done"), ("running loki", 53, "Loki scanning for IOCs (the long step)"),
     ("loki done", 74, "Loki done"), ("running goaccess", 75, "GoAccess web statistics"), ("goaccess done", 77, "GoAccess done"),
     ("converting web and auth logs", 78, "Chainsaw + Sigma over the logs"), ("chainsaw done", 82, "Chainsaw done"),

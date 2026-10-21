@@ -891,6 +891,22 @@ class Intake:
             from .collect import collect_case
             collect_case(case, db=True, log=self.log)
             self._save(case)
+        # players: the graph over everything extracted so far (tables, logs, panel, documents)
+        try:
+            from . import players as players_mod
+            self.log("[intake] players: building")
+            pst = players_mod.build(case, self.log)
+            self.record["players"] = pst
+            try:
+                from .index import Index
+                ix = Index(case)
+                ix.add_players(self.log)
+                ix.close()
+            except Exception as e:  # noqa: BLE001
+                self.log(f"[intake] players: index not updated ({e})")
+            self._save(case)
+        except Exception as e:  # noqa: BLE001 - never sink an intake over the graph
+            self.log(f"[intake] players: failed: {type(e).__name__}: {e}")
         if deep:
             self.log("[intake] deep: starting")
             from .deep import run as deep_run
@@ -901,7 +917,9 @@ class Intake:
         dbs = self.record.get("databases") or []
         dbtxt = (f"{len([d for d in dbs if not d.get('error')])} database source(s) -> {sum(d.get('tables_total') or 0 for d in dbs)} tables, "
                  f"{sum(d.get('rows_total') or 0 for d in dbs)} rows as CSV") if dbs else "no databases"
-        self.log(f"[intake] done: case {case_id} in {(time.time() - t0) / 60:.0f} min - {dbtxt}; {s.get('total', 0)} findings" +
+        pst = self.record.get("players") or {}
+        pltxt = f"; {pst.get('players', 0)} players / {pst.get('entities', 0)} identifiers" if pst else ""
+        self.log(f"[intake] done: case {case_id} in {(time.time() - t0) / 60:.0f} min - {dbtxt}{pltxt}; {s.get('total', 0)} findings" +
                  (f"; aaPanel {'found at ' + aa.get('path', '/www/server/panel') if aa.get('present') else 'not found'}" if collect else ""))
         return case
 

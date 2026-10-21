@@ -169,6 +169,42 @@ How: a data directory is never copied or written - a private MariaDB (or the bun
 and every table is streamed out. Dumps are parsed straight to CSV (several processes on big plain files).
 Search every exported table from the tab (name, e-mail, phone, IP ...), case-insensitive, any script.
 
+### Players: who is in the data, how they connect, where the money went
+
+Players tab (or `gumshoe players build|list|show|find|trends`). Built by every intake after the databases
+are extracted (press **Build players** / **Rebuild** for a case made by hand or after extracting more
+databases). No model is involved: everything is counted from the CSV tables, the logs, the panel inventory
+and the extracted documents, and every fact keeps its locator (`database.table:row`, `auth.log:line`,
+document path) so you can go and look.
+
+- **Identifiers**: e-mails, phones, IPs (v4/v6), crypto wallets (Bitcoin legacy/segwit/taproot, Ethereum,
+  Litecoin, Tron, XRP, Bitcoin Cash, Monero, Solana ...), transaction ids, password hashes, IBANs, card
+  numbers (Luhn-checked), SSH key fingerprints, usernames, names, domains, URLs - each validated, normalised
+  (`+1 (555) 010-0100` and `15550100100` are one phone), with counts, first/last seen, and where.
+- **Players**: account-like rows (a row holding an e-mail or username plus a name/phone/password hash) are
+  merged only over **strong** identifiers - e-mail, phone, wallet, password hash, IBAN, card, SSH key,
+  transaction id. Never over IPs, usernames or names (shared infrastructure must not fuse people). An
+  identifier seen in more than 50 account rows (a placeholder e-mail, a default hash) links nothing. Foreign
+  keys are followed: `logins.customer_id` joins the customer, so the login's IP and time belong to the player.
+- **Linked / shared**: IPs, domains, wallets, names reached through rows and log lines carrying the player's
+  strong identifiers; an IP used by 8 or more players is marked **shared** (proxy, NAT, the office) instead
+  of being treated as that player's.
+- **Timeline**: activity per day per identifier - the dossier's bar chart; **Trends and money** shows bursts
+  (days above 4× the median), new account rows per month, IPs by number of players, and the most active
+  identifiers of the last week in the data.
+- **Money**: rows of transaction-like tables (an amount plus a wallet/txid/account reference) summed per
+  player and per currency, each row attributed through the identifiers on it; every wallet with its
+  mentions and the players holding it.
+
+What comes out, under `<exports>\<case>\players\` (Excel-ready): `players.csv`, `entities.csv`,
+`links.csv`, `wallets.csv`, `transactions.csv`, `activity.csv` and `dossiers\player-NNNNN.md` (one
+Markdown dossier per player: identifiers, links, timeline, money, source rows). The dossiers are also
+indexed for Ask, so "what do we know about ivan.petrov@mail.ru" cites `players://12`.
+
+Look up an identifier (second sub-tab) to pivot on anything: where it appears, what it co-occurs with,
+which players hold it. Tables are scanned in parallel; a table with more than 4,000,000 distinct
+identifiers is capped (the log says so) - rare outside raw traffic logs.
+
 ### Findings: read, mark, export
 
 Findings tab: filter by severity (pills), source, rule, free text and status; tick rows in the table

@@ -75,7 +75,7 @@ def assemble(case, name: str, paths: Optional[list[str]] = None, finding_ids: Op
     wanted: dict[str, list[str]] = {}
 
     def add(path: Optional[str], why: str):
-        if path and not path.startswith(("finding://", "summary://")):
+        if path and not path.startswith(("finding://", "summary://", "players://")):
             wanted.setdefault(path, []).append(why)
 
     for p in paths or []:

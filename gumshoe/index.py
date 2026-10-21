@@ -122,6 +122,28 @@ class Index:
         self.con.commit()
         return n
 
+    def add_players(self, log=print) -> int:
+        """One searchable dossier per player (players://<id>), so Ask can answer 'what do we know about X' with a citation."""
+        from .players import open_db, dossier_text, list_players
+        con = open_db(self.case)
+        if con is None:
+            return 0
+        n = 0
+        try:
+            for p in list_players(con, limit=5000):
+                text = dossier_text(con, p["id"])
+                if not text:
+                    continue
+                sid = self._upsert_source(f"players://{p['id']}", "player", None, len(text), False)
+                for bs, be, ls, le, chunk in _chunk_text(text, self.cfg["chunk_chars"], self.cfg["chunk_overlap"]):
+                    self._add_chunk(sid, bs, be, ls, le, chunk)
+                    n += 1
+        finally:
+            con.close()
+        self.con.commit()
+        log(f"[index] player dossier chunks: {n}")
+        return n
+
     def add_documents(self, log=print) -> int:
         """Index the extracted text of every inventoried document under the ORIGINAL path
         (kind=document), so a citation names the spreadsheet/PDF/Word file itself and the
@@ -319,6 +341,10 @@ def build(case, log=print, with_vectors: bool = False, client=None) -> dict[str,
     log(f"[index] artifact chunks: {na}")
     nd = idx.add_documents(log=log)
     log(f"[index] document chunks: {nd}")
+    try:
+        idx.add_players(log=log)
+    except Exception as e:  # noqa: BLE001 - dossiers are a bonus, never a reason to fail the index
+        log(f"[index] players skipped: {e}")
     nv = 0
     if with_vectors and client is not None:
         nv = idx.add_vectors(client, log=log)

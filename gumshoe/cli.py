@@ -307,6 +307,41 @@ def cmd_db(args):
             print(f"[db] {s_.get('rel') or s_.get('path')}: FAILED {type(e).__name__}: {e}")
 
 
+def cmd_players(args):
+    """Who is in the evidence: build the identifier graph, list/show players, look an identifier up, trends."""
+    from . import players
+    c = _case(args)
+    if args.p_cmd == "build":
+        r = players.build(c, print, workers=args.workers)
+        try:
+            from .index import Index
+            idx = Index(c)
+            idx.add_players(print)
+            idx.close()
+        except Exception as e:  # noqa: BLE001
+            print(f"[players] index not updated: {e}")
+        print(json.dumps(r, indent=2))
+        return
+    con = players.open_db(c)
+    if con is None:
+        sys.exit("no players database yet: run `gumshoe players build`")
+    if args.p_cmd == "list":
+        for p in players.list_players(con, limit=args.limit, q=args.q or ""):
+            money = ";".join(f"{k}:{v['sum']:.2f}" for k, v in p["money"].items())
+            print(f"{p['id']:5d} {p['label'][:40]:40s} {','.join(p['emails'][:2]):40.40s} ips {len(p['ips'])} wallets {len(p['wallets'])} "
+                  f"money {money:30.30s} {p['first_seen'] or '':19.19s} .. {p['last_seen'] or '':19.19s}")
+    elif args.p_cmd == "show":
+        print(players.dossier_text(con, int(args.id)))
+    elif args.p_cmd == "find":
+        for e in players.entity_lookup(con, args.text):
+            print(f"{e['type']} {e['value']} x{e['count']} {e['first_seen'] or ''}..{e['last_seen'] or ''} players {[(x['id'], x['label']) for x in e['players']]}")
+            for l in e["linked"][:15]:
+                print(f"    -> {l['type']} {l['value']} x{l['n']} ({l['where_']})")
+    elif args.p_cmd == "trends":
+        print(json.dumps(players.trends(con), indent=2, default=str)[:20000])
+    con.close()
+
+
 def cmd_settings(args):
     """Show or change the examiner settings (hopper / work / exports folders, examiner name)."""
     from . import settings as cfgstore
@@ -527,6 +562,13 @@ def main(argv=None):
     d.add_argument("path", nargs="?"); d.add_argument("--all", action="store_true"); d.add_argument("--index")
     d = dsub.add_parser("list", help="what has been extracted")
     d = dsub.add_parser("search", help="search every exported CSV"); d.add_argument("text"); d.add_argument("--max", type=int, default=500)
+    s = sub.add_parser("players", help="who is in the evidence: identifiers, links, timelines, wallets and money (build / list / show / find / trends)"); s.set_defaults(fn=cmd_players)
+    psub = s.add_subparsers(dest="p_cmd", required=True)
+    d = psub.add_parser("build"); d.add_argument("--workers", type=int)
+    d = psub.add_parser("list"); d.add_argument("--limit", type=int, default=50); d.add_argument("--q")
+    d = psub.add_parser("show"); d.add_argument("id")
+    d = psub.add_parser("find"); d.add_argument("text")
+    d = psub.add_parser("trends")
     s = sub.add_parser("settings", help="show or set the hopper / work / exports folders and the examiner name"); s.set_defaults(fn=cmd_settings)
     s.add_argument("--hopper"); s.add_argument("--work"); s.add_argument("--exports"); s.add_argument("--examiner")
     s = sub.add_parser("remount", help="after a reboot: mount a case's evidence again as intake did"); s.set_defaults(fn=cmd_remount)

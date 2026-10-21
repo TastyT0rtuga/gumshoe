@@ -90,7 +90,7 @@ def render_findings_tab(case, findings: list[dict], show_preview, cases_root: Pa
     df = pd.DataFrame([{"": _ICON[status_of(rev, f["id"])], "severity": f["severity"], "source": f["source"], "title": f["title"],
                         "path": f.get("path") or "", "line": str(f.get("line") or ""), "when": str(f.get("ctime") or f.get("mtime") or ""),
                         "note": (rev.get(f["id"]) or {}).get("note", ""), "id": f["id"]} for f in rows])
-    ev = st.dataframe(df, use_container_width=True, hide_index=True, on_select="rerun", selection_mode="multi-row", key="fx_table",
+    ev = st.dataframe(df, width="stretch", hide_index=True, on_select="rerun", selection_mode="multi-row", key="fx_table",
                       column_config={"": st.column_config.TextColumn("", width="small"), "severity": st.column_config.TextColumn(width="small"),
                                      "title": st.column_config.TextColumn(width="large"), "path": st.column_config.TextColumn(width="medium"),
                                      "id": st.column_config.TextColumn(width="small")})

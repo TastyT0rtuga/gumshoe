@@ -66,7 +66,7 @@ with st.sidebar:
         pins = read_pins(case)
         st.caption("pinned findings: " + (", ".join(pins) if pins else "none"))
 
-tabs = st.tabs(["Run", "Databases", "Findings", "Ask", "Documents", "Browse", "Panel", "Trends", "Timeline", "Reports", "Evidence", "Export", "Custody"])
+tabs = st.tabs(["Run", "Databases", "Players", "Findings", "Ask", "Documents", "Browse", "Panel", "Trends", "Timeline", "Reports", "Evidence", "Export", "Custody"])
 findings = case.read_findings()
 if "export_set" not in st.session_state:
     st.session_state.export_set = {}
@@ -81,7 +81,7 @@ def show_preview(relpath: str, key: str):
         rows = pv["sheets"][sheet]
         if rows:
             width = max(len(r) for r in rows)
-            st.dataframe(pd.DataFrame([list(r) + [""] * (width - len(r)) for r in rows]), use_container_width=True)
+            st.dataframe(pd.DataFrame([list(r) + [""] * (width - len(r)) for r in rows]), width="stretch")
         else:
             st.info("empty sheet")
     elif pv["kind"] == "markdown":
@@ -116,10 +116,14 @@ with tabs[1]:
     render_db_tab(case, ROOT, CASES)
 
 with tabs[2]:
+    from gumshoe.ui.players_panel import render_players_tab
+    render_players_tab(case, ROOT, CASES)
+
+with tabs[3]:
     from gumshoe.ui.findings_panel import render_findings_tab
     render_findings_tab(case, findings, show_preview, CASES)
 
-with tabs[3]:
+with tabs[4]:
     st.caption("Answers come only from indexed sources and must cite them; citations outside the retrieved set are removed. "
                "Cited files are archived automatically.")
     from gumshoe.memory import read_session, clear_session, list_sessions, read_notes
@@ -164,13 +168,13 @@ with tabs[3]:
                 row = idx.con.execute("SELECT text FROM chunks WHERE id=?", (s["chunk_id"],)).fetchone()
                 if row:
                     st.code(row[0])
-                if not s["relpath"].startswith(("finding://", "summary://")):
+                if not s["relpath"].startswith(("finding://", "summary://", "players://")):
                     if st.checkbox("View the file", key=f"srcview_{r.get('question_index')}_{s['n']}"):
                         show_preview(s["relpath"], f"q{r.get('question_index')}s{s['n']}")
         idx.close()
         if st.button("Add all cited files to export set"):
             for s in r["sources"]:
-                if s["n"] in valid and not s["relpath"].startswith(("finding://", "summary://")):
+                if s["n"] in valid and not s["relpath"].startswith(("finding://", "summary://", "players://")):
                     st.session_state.export_set[s["relpath"]] = f"cited [{s['n']}] question {r.get('question_index')}"
             st.success(f"export set: {len(st.session_state.export_set)} file(s)")
     qlog = case.reports / "questions.jsonl"
@@ -180,7 +184,7 @@ with tabs[3]:
                 d = json.loads(line)
                 st.markdown(f"- {d['asked_at']} — {d['question']} → {'answered' if d.get('answer') else 'no model'}")
 
-with tabs[4]:
+with tabs[5]:
     doc = case.read_json("documents.json", {}) or {}
     items = doc.get("items", [])
     if not items:
@@ -193,12 +197,12 @@ with tabs[4]:
         rows = [i for i in items if (not kinds or i["kind"] in kinds) and (not q or q.lower() in i["path"].lower())]
         df = pd.DataFrame([{"path": i["path"], "kind": i["kind"], "size": i["size"], "mtime": i["mtime"], "ctime": i["ctime"],
                             "text": bool((i.get("extracted") or {}).get("text_file")), "sha256": (i.get("sha256") or "")[:16]} for i in rows])
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.dataframe(df, width="stretch", hide_index=True)
         if rows:
             pick = st.selectbox("Open", [i["path"] for i in rows])
             show_preview(pick, "doc" + str(abs(hash(pick))))
 
-with tabs[5]:
+with tabs[6]:
     from gumshoe.integrity import stat_times
     st.caption("Every file on the image, read-only. Open anything; viewing or downloading archives it and logs it.")
     if "browse_path" not in st.session_state:
@@ -219,7 +223,7 @@ with tabs[5]:
                                 "ctime": s["ctime"], "mode": s["mode"]})
             except OSError:
                 continue
-        st.dataframe(pd.DataFrame(entries), use_container_width=True, hide_index=True, height=320)
+        st.dataframe(pd.DataFrame(entries), width="stretch", hide_index=True, height=320)
         names = [e["name"] for e in entries]
         c1, c2 = st.columns([3, 1])
         pick = c1.selectbox("Open", [".."] + names, key="browse_pick")
@@ -233,7 +237,7 @@ with tabs[5]:
             st.session_state.export_set[st.session_state.browse_path] = "directory from browser"
             st.success(f"export set: {len(st.session_state.export_set)} entries (directories export every file under them)")
 
-with tabs[6]:
+with tabs[7]:
     inv = case.read_json("inventory.json", {}) or {}
     aa = inv.get("aapanel") or {}
     if not aa.get("present"):
@@ -269,11 +273,11 @@ with tabs[6]:
             rows = aa.get(key) or []
             if rows:
                 st.markdown(f"**{title}** ({len(rows)})")
-                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+                st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
         crons = aa.get("panel_cron") or []
         if crons:
             st.markdown(f"**Scheduled tasks** ({len(crons)})")
-            st.dataframe(pd.DataFrame([{k: v for k, v in c.items() if k != "sBody"} for c in crons]), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame([{k: v for k, v in c.items() if k != "sBody"} for c in crons]), width="stretch", hide_index=True)
             for c in crons:
                 if c.get("sBody"):
                     with st.expander(f"script of '{c.get('name')}' (id {c.get('echo')})"):
@@ -286,18 +290,18 @@ with tabs[6]:
         if oplog.get("by_ip"):
             st.markdown(f"**Operation log** — {oplog.get('rows')} entries; by type {oplog.get('by_type')}")
             st.dataframe(pd.DataFrame([{"ip": ip, **{k: v for k, v in e.items() if k != 'types'}, "types": ", ".join(e.get("types", []))}
-                                       for ip, e in oplog["by_ip"].items()]).sort_values("count", ascending=False), use_container_width=True, hide_index=True)
+                                       for ip, e in oplog["by_ip"].items()]).sort_values("count", ascending=False), width="stretch", hide_index=True)
             sample = aa.get("operation_log_sample") or []
             if sample:
                 q = st.text_input("filter operation log entries (type, text, IP)", "")
                 rows = [r for r in sample if not q or q.lower() in json.dumps(r, ensure_ascii=False).lower()]
-                st.dataframe(pd.DataFrame(rows[-500:]), use_container_width=True, hide_index=True)
+                st.dataframe(pd.DataFrame(rows[-500:]), width="stretch", hide_index=True)
         vh = aa.get("vhosts") or []
         if vh:
             st.markdown(f"**Web server vhost configs** ({len(vh)})")
             for v in vh:
                 with st.expander(v["file"]):
-                    st.dataframe(pd.DataFrame(v["directives"]), hide_index=True, use_container_width=True)
+                    st.dataframe(pd.DataFrame(v["directives"]), hide_index=True, width="stretch")
         webapps = (inv.get("webapps") or {}).get("sites") or []
         if webapps:
             st.markdown(f"**Web applications** ({len(webapps)})")
@@ -308,21 +312,21 @@ with tabs[6]:
                         for c in w["configs"]:
                             st.json({c["file"]: c["facts"]})
                     if w.get("plugins"):
-                        st.markdown("plugins"); st.dataframe(pd.DataFrame(w["plugins"]), hide_index=True, use_container_width=True)
+                        st.markdown("plugins"); st.dataframe(pd.DataFrame(w["plugins"]), hide_index=True, width="stretch")
                     if w.get("themes"):
-                        st.markdown("themes"); st.dataframe(pd.DataFrame(w["themes"]), hide_index=True, use_container_width=True)
+                        st.markdown("themes"); st.dataframe(pd.DataFrame(w["themes"]), hide_index=True, width="stretch")
                     st.markdown("entry points: " + ", ".join(w["php"]["entry_points"][:40]))
                     if w["php"]["external_hosts"]:
                         st.markdown("external hosts referenced in code: " + ", ".join(f"{h} ({n})" for h, n in w["php"]["external_hosts"][:30]))
                     if w["php"]["special_files"]:
-                        st.dataframe(pd.DataFrame(w["php"]["special_files"]), hide_index=True, use_container_width=True)
+                        st.dataframe(pd.DataFrame(w["php"]["special_files"]), hide_index=True, width="stretch")
         ini = (inv.get("webapps") or {}).get("php_ini") or []
         if ini:
             st.markdown("**PHP configuration**")
             for i in ini:
                 st.json({i["file"]: i["facts"]})
 
-with tabs[7]:
+with tabs[8]:
     trends = case.read_json("trends.json", {}) or {}
     inv = case.read_json("inventory.json", {}) or {}
     for site, s in (trends.get("sites") or {}).items():
@@ -350,7 +354,7 @@ with tabs[7]:
     if not trends and not auth:
         st.info("No trends yet: run `gumshoe collect` with GoAccess and the auth converter.")
 
-with tabs[8]:
+with tabs[9]:
     import sqlite3
     tldb = case.collected / "timeline.db"
     bursts = case.read_json("bursts.json", []) or []
@@ -380,7 +384,7 @@ with tabs[8]:
         q = (f"SELECT datetime(ctime,'unixepoch') AS ctime, datetime(mtime,'unixepoch') AS mtime, datetime(crtime,'unixepoch') AS crtime, "
              f"size, mode, uid, gid, path FROM files WHERE {' AND '.join(where)} ORDER BY ctime DESC LIMIT ?")
         df = pd.read_sql_query(q, con, params=params + [n])
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.dataframe(df, width="stretch", hide_index=True)
         days = pd.read_sql_query(f"SELECT date(ctime,'unixepoch') AS day, COUNT(*) AS files FROM files WHERE {' AND '.join(where)} "
                                  f"AND ctime IS NOT NULL GROUP BY day ORDER BY day", con, params=params)
         if not days.empty:
@@ -389,7 +393,7 @@ with tabs[8]:
     else:
         st.info("No timeline yet (UAC bodyfile not normalized).")
 
-with tabs[9]:
+with tabs[10]:
     kind = st.selectbox("Report", ["triage", "trends", "ioc"])
     use_llm = st.checkbox("Include AI narrative sections (labelled, cited, 7B model)", value=False)
     if st.button("Generate"):
@@ -405,24 +409,24 @@ with tabs[9]:
                 st.download_button("download HTML", h.read_bytes(), file_name=h.name, key="dlh" + p.name)
             st.markdown(p.read_text("utf-8")[:20000])
 
-with tabs[10]:
+with tabs[11]:
     mp = case.evidence / "manifest.json"
     if mp.exists():
         m = json.loads(mp.read_text("utf-8"))
         rows = [{"sha256": k[:16], **{kk: vv for kk, vv in v.items() if kk != "copies"}, "copies": len(v["copies"])} for k, v in m["items"].items()]
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
         if st.button("Verify archive hashes"):
             from gumshoe.archive import verify_archive
             st.json(verify_archive(case))
     else:
         st.info("Nothing archived yet. Cited sources and high/critical findings are archived automatically.")
 
-with tabs[11]:
+with tabs[12]:
     es = st.session_state.export_set
     st.caption("Files added from findings, answers or the document viewer. Building copies the originals (tree preserved) with a "
                "hashed manifest and a zip, and logs it.")
     if es:
-        st.dataframe(pd.DataFrame([{"path": p, "why": w} for p, w in es.items()]), hide_index=True, use_container_width=True)
+        st.dataframe(pd.DataFrame([{"path": p, "why": w} for p, w in es.items()]), hide_index=True, width="stretch")
         name = st.text_input("Export name", f"export-{len(es)}-files")
         c1, c2 = st.columns(2)
         if c1.button("Build export zip"):
@@ -447,8 +451,8 @@ with tabs[11]:
             extra = " · " + ", ".join(fn for fn in ("findings.md", "findings.html", "findings.csv") if (d / fn).exists()) if d.is_dir() else ""
             st.download_button(zp.name + extra, zp.read_bytes(), file_name=zp.name, key="pz" + zp.name)
 
-with tabs[12]:
+with tabs[13]:
     st.markdown(("✅ " if ok_chain else "❌ ") + chain_msg)
     recs = case.custody.tail(200)
     st.dataframe(pd.DataFrame([{"seq": r.seq, "ts": r.ts, "action": r.action, "details": json.dumps(r.details, default=str)[:200]} for r in recs]),
-                 use_container_width=True, hide_index=True)
+                 width="stretch", hide_index=True)

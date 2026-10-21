@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **Players** (`gumshoe players build|list|show|find|trends`, the Players tab, a stage of every intake after
+  the databases): a deterministic graph of who is in the evidence - every validated identifier (e-mail,
+  phone, IPv4/IPv6, wallet addresses of the main chains with checksum validation, transaction ids, password
+  hashes, IBAN, Luhn-checked cards, SSH key fingerprints, usernames, names, domains, URLs) from the CSV
+  tables, the normalized logs, the panel inventory, the findings and the extracted documents, normalised
+  and counted with first/last seen and a locator for every fact. Account-like rows merge into players over
+  strong identifiers only (never over IPs, usernames or names; promiscuous identifiers are not glue;
+  foreign keys such as `customer_id` are followed into the account table), IPs/domains/wallets attach as
+  linked or shared (≥ 8 players), activity per identifier per day gives the timelines and bursts, and
+  transaction-like tables are summed per player, per wallet and per currency. Stored in
+  `<case>/players/players.db`, written as CSV folders plus one Markdown dossier per player under
+  `<exports>/<case>/players/`, and the dossiers are indexed for Ask (`players://<id>`). Tables are scanned
+  in parallel with per-table memory bounds; the merge into SQLite is bulk.
 - **Databases to CSV** (`gumshoe db scan|extract|list|search`, the Databases tab, a stage of every intake):
   MariaDB/MySQL data directories are opened by a private server over an **overlay** (the evidence stays
   read-only, the server's writes - crash recovery - land in the work folder; a 100 GB datadir is not

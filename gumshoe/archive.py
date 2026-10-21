@@ -31,7 +31,7 @@ def _save_manifest(case, m: dict[str, Any]) -> None:
 def archive(case, relpath: str, reason: str, ref_id: Optional[str] = None, line_start: Optional[int] = None,
             line_end: Optional[int] = None) -> Optional[dict[str, Any]]:
     """Returns the sidecar dict, or None if the path is not a file on the mount."""
-    if not relpath or relpath.startswith(("finding://", "summary://")):
+    if not relpath or relpath.startswith(("finding://", "summary://", "players://")):
         return None
     src = case.abs(relpath)
     if not src.exists() or not src.is_file():

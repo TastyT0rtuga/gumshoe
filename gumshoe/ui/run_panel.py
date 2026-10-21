@@ -25,6 +25,8 @@ STEPS = {
                 lambda c: ["collect", "--normalize-only", "--db"]),
     "databases": ("Databases to CSV", "find every database on the evidence (data directories, dumps, sqlite) and export the tables as CSV folders (minutes to hours)",
                 lambda c: ["db", "extract"]),
+    "players": ("Players", "who is in the evidence: identifiers, links, timelines, wallets and money from the CSV exports, logs, panel and documents (minutes)",
+                lambda c: ["players", "build"]),
 }
 
 
@@ -122,6 +124,9 @@ MILESTONES = {
     "databases": [("start:", 2, "starting"), ("[db] scan", 4, "scanning"), ("[db] extracting", 8, "extracting"), ("[db] private server up", 18, "private server up"),
                   ("[db] worker", 30, "parsing the dump"), ("rows so far", 40, "streaming tables"), ("[db] [", 45, "tables"), ("[db] done", 98, "finishing"),
                   ("finished with exit", 100, "done")],
+    "players": [("start:", 2, "starting"), ("[players] start", 4, "reading the database exports"), ("join table", 8, "join tables"), ("[players] [", 20, "scanning tables"),
+                ("auth log", 70, "logs"), ("documents scanned", 80, "documents"), ("players from", 90, "deriving players"), ("CSV folders", 96, "writing CSV folders"),
+                ("finished with exit", 100, "done")],
     "deep":    [("start:", 2, "starting"), ("running uac", 4, "UAC"), ("running loki", 8, "Loki (intense)"), ("loki done", 40, "Loki done"),
                 ("chainsaw done", 48, "Chainsaw done"), ("[dbreview]", 50, "MariaDB review"), ("[normalize]", 58, "normalizing"),
                 ("[documents]", 64, "documents"), ("[index]", 72, "indexing"), ("[vectors]", 80, "vectors"),

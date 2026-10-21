@@ -114,7 +114,7 @@ def _body(case, root: Path, cases_root: Path):
         picks = {s["path"] for s in dbexport.auto_pick([dict(x) for x in sources])}
         rows = [{"#": i, "what": _kind_label(s["kind"]), "where": s.get("rel", s["path"]), "size": dbexport.human(s.get("size", 0)),
                  "databases": ", ".join(s.get("databases", [])[:6]), "auto": "yes" if s["path"] in picks else ""} for i, s in enumerate(sources)]
-        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
         idx = st.multiselect("Extract only these (by #)", [r["#"] for r in rows], key="db_pick")
         if idx and st.button(f"Extract {len(idx)} selected", key="db_extract_sel", disabled=(ext_status == "running")):
             _start(root, cases_root, case.dir, "dbextract", ["db", "extract", "--index", ",".join(str(i) for i in idx)])
@@ -153,7 +153,7 @@ def _body(case, root: Path, cases_root: Path):
             tcsv = Path(e["dir"]) / "tables.csv"
             if tcsv.exists():
                 tdf = pd.read_csv(tcsv, dtype=str, keep_default_na=False)
-                st.dataframe(tdf, hide_index=True, use_container_width=True)
+                st.dataframe(tdf, hide_index=True, width="stretch")
                 choices = [f"{r['database']}/{r['table']}" for _, r in tdf.iterrows() if r["files"]]
                 pick = st.selectbox("Preview a table (first 200 rows)", ["-"] + choices, key=f"pv_{e['name']}")
                 if pick != "-":
@@ -163,7 +163,7 @@ def _body(case, root: Path, cases_root: Path):
                     fp = out / dbexport.slug(dbn) / first
                     if fp.exists():
                         hdr, rows = dbexport.preview(fp, 200)
-                        st.dataframe(pd.DataFrame(rows, columns=hdr if hdr and all(len(r) == len(hdr) for r in rows) else None), use_container_width=True, hide_index=True)
+                        st.dataframe(pd.DataFrame(rows, columns=hdr if hdr and all(len(r) == len(hdr) for r in rows) else None), width="stretch", hide_index=True)
                         if fp.stat().st_size <= 50 * 2**20:
                             st.download_button(f"Download {first}", fp.read_bytes(), file_name=first, key=f"dl_{e['name']}_{tbl}")
                         else:
@@ -184,7 +184,7 @@ def _body(case, root: Path, cases_root: Path):
         st.caption(f"{len(hits)} hit(s)" + (" (first 500)" if len(hits) >= 500 else ""))
         if hits:
             st.dataframe(pd.DataFrame([{"export": h["export"], "database": h["database"], "table": h["table"], "line": h["line"], "row": h["text"]} for h in hits]),
-                         hide_index=True, use_container_width=True)
+                         hide_index=True, width="stretch")
             sel = st.selectbox("Show a hit as a row", ["-"] + [f"{i}: {h['database']}/{h['table']}:{h['line']}" for i, h in enumerate(hits[:200])], key="db_hit")
             if sel != "-":
                 h = hits[int(sel.split(":", 1)[0])]
@@ -192,7 +192,7 @@ def _body(case, root: Path, cases_root: Path):
                     with open(h["file"], "r", encoding="utf-8-sig", newline="") as f:
                         hdr = next(csv.reader(f))
                     cells = next(csv.reader([h["text"]]))
-                    st.dataframe(pd.DataFrame([cells], columns=hdr if len(hdr) == len(cells) else None).T.rename(columns={0: "value"}), use_container_width=True)
+                    st.dataframe(pd.DataFrame([cells], columns=hdr if len(hdr) == len(cells) else None).T.rename(columns={0: "value"}), width="stretch")
                 except Exception as ex:  # noqa: BLE001
                     st.code(h["text"])
                     st.caption(str(ex))
