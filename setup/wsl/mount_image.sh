@@ -6,6 +6,8 @@
 #   mount_image /mnt/d/case/Webserver.E01              # mounts the root filesystem at /mnt/evidence
 #   mount_image image.raw --part 2                      # choose a partition explicitly
 #   mount_image image.raw --lv VulnOSv2-vg/root         # choose a logical volume explicitly
+#   mount_image image.raw --part 1 --at /www            # add a 2nd volume on top of the mounted root
+#   mount_image data.raw --lv datavg/www --at /www      # (same image or another one; e.g. a data disk at /www)
 #   mount_image --umount                                # undo everything
 #
 # Read-only at every layer: the loop device is read-only, LVM is told to activate the volume group
@@ -14,10 +16,10 @@
 # Works without udev (WSL has none): LVM is run with udev_rules/udev_sync off and the device nodes are
 # created by vgmknodes/dmsetup instead.
 set -uo pipefail
-TARGET=/mnt/evidence; EWF=/mnt/ewf; PART=""; LV=""; IMG=""
+TARGET=/mnt/evidence; EWF=/mnt/ewf; PART=""; LV=""; IMG=""; AT=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --umount) IMG=UMOUNT;; --target) TARGET="$2"; shift;; --part) PART="$2"; shift;; --lv) LV="$2"; shift;;
+    --umount) IMG=UMOUNT;; --target) TARGET="$2"; shift;; --part) PART="$2"; shift;; --lv) LV="$2"; shift;; --at) AT="$2"; shift;;
     -h|--help) sed -n 2,13p "$0"; exit 0;;
     *) IMG="$1";;
   esac; shift
@@ -40,7 +42,9 @@ if [ "$IMG" = "UMOUNT" ]; then
   else
     echo "no mount recorded in $STATE; cleaning up whatever an earlier attempt left behind"
   fi
-  umount "$TARGET" 2>/dev/null && echo "unmounted $TARGET"
+  # -R: anything mounted on top of the target (a second volume at $TARGET/www, say) goes first
+  umount -R "$TARGET" 2>/dev/null && echo "unmounted $TARGET" || { umount "$TARGET" 2>/dev/null && echo "unmounted $TARGET"; }
+  for m in $(awk -v t="$TARGET/" 'index($2,t)==1{print $2}' /proc/mounts | sort -r); do umount "$m" 2>/dev/null && echo "unmounted $m"; done
   # every VG that lives on our loop/nbd devices (the filter keeps the examiner's own disks out of it)
   for vg in ${VG:-} $(lvm vgs --noheadings -o vg_name --config "$(lvm_cfg)" 2>/dev/null); do
     VG="$vg"; lvmc vgchange -an "$vg" >/dev/null 2>&1 && echo "deactivated VG $vg"
@@ -50,16 +54,37 @@ if [ "$IMG" = "UMOUNT" ]; then
     kpartx -d "$l" >/dev/null 2>&1
     losetup -d "$l" 2>/dev/null && echo "released $l"
   done
-  for n in ${NBD:-} /dev/nbd0; do [ -e "$n" ] && qemu-nbd --disconnect "$n" >/dev/null 2>&1 && echo "disconnected $n"; done
-  mountpoint -q "$EWF" && fusermount -u "$EWF" 2>/dev/null && echo "unmounted $EWF"
+  for n in ${NBD:-} /dev/nbd0 /dev/nbd1; do [ -e "$n" ] && qemu-nbd --disconnect "$n" >/dev/null 2>&1 && echo "disconnected $n"; done
+  for e in "$EWF" /mnt/ewf /mnt/ewf2; do mountpoint -q "$e" 2>/dev/null && fusermount -u "$e" 2>/dev/null && echo "unmounted $e"; done
   rm -f "$STATE"; exit 0
 fi
-[ -n "$IMG" ] && [ -f "$IMG" ] || { echo "usage: $0 <image.E01|image.raw|image.dd|image.vhdx> [--part N] [--lv VG/LV] [--target DIR] | --umount"; exit 1; }
-[ -f "$STATE" ] && die "something is already mounted by this script (see $STATE); run: $0 --umount   (or press Unmount in the UI)"
+[ -n "$IMG" ] && [ -f "$IMG" ] || { echo "usage: $0 <image.E01|image.raw|image.dd|image.vhdx> [--part N] [--lv VG/LV] [--target DIR] [--at /www] | --umount"; exit 1; }
+MOUNT_AT="$TARGET"; SAME_IMAGE=0; MAIN_LOOP=""; MAIN_NBD=""; MAIN_PARTS=""
+if [ -n "$AT" ]; then
+  # an additional volume on top of the mounted root: the original server's /www (data disk), /home, /var/lib/mysql ...
+  [ -f "$STATE" ] || die "nothing is mounted yet: mount the root volume first, then add a volume with --at"
+  # shellcheck disable=SC1090
+  . "$STATE"
+  [ -n "$PART$LV" ] || die "--at needs --part N or --lv VG/LV to say which volume goes there"
+  MOUNT_AT="$TARGET/${AT#/}"
+  [ -d "$MOUNT_AT" ] || die "$MOUNT_AT does not exist on the mounted root: the mount point must exist there (it did on the original server, see its /etc/fstab)"
+  mountpoint -q "$MOUNT_AT" && die "$MOUNT_AT is already a mount point"
+  if [ -n "${IMAGE:-}" ] && [ "$(readlink -f "$IMG")" = "$(readlink -f "$IMAGE")" ]; then
+    SAME_IMAGE=1; MAIN_LOOP="$LOOPDEV"; MAIN_NBD="$NBD"; MAIN_PARTS="$PARTS"
+    echo "== same image as the mounted root: reusing its devices"
+  else
+    EWF=/mnt/ewf2
+  fi
+else
+  [ -f "$STATE" ] && die "something is already mounted by this script (see $STATE); run: $0 --umount   (or press Unmount in the UI). To add a volume on top of it use --at /dir"
+  mountpoint -q "$TARGET" && die "$TARGET is already a mount point; unmount it first"
+fi
 mkdir -p "$TARGET" "$EWF"
-mountpoint -q "$TARGET" && die "$TARGET is already a mount point; unmount it first"
 LOOPDEV=""; NBD=""; VG=""; RAW=""; PARTS="none"
 
+if [ "$SAME_IMAGE" = 1 ]; then
+  LOOPDEV="$MAIN_LOOP"; NBD="$MAIN_NBD"; PARTS="$MAIN_PARTS"; RAW="${LOOPDEV:-$NBD}"
+else
 case "${IMG,,}" in
   *.e01|*.ex01)
     command -v ewfmount >/dev/null || die "ewfmount missing (apt install ewf-tools)"
@@ -71,16 +96,17 @@ case "${IMG,,}" in
     command -v qemu-nbd >/dev/null || die "qemu-nbd missing (apt install qemu-utils)"
     modprobe nbd max_part=16 2>/dev/null || true
     [ -e /dev/nbd0 ] || die "no /dev/nbd0: this kernel has no nbd module (WSL: use wsl --mount --vhd on the Windows side, or convert to raw with qemu-img)"
-    NBD=/dev/nbd0
+    NBD=/dev/nbd0; [ -n "$AT" ] && NBD=/dev/nbd1
     qemu-nbd --read-only --connect="$NBD" "$IMG" || die "qemu-nbd failed"
     sleep 1; RAW="$NBD";;
   *) RAW="$IMG";;
 esac
+fi
 
 echo "== partitions"
 mmls "$RAW" 2>/dev/null || fdisk -l "$RAW" 2>/dev/null || echo "(no partition table: treating the image as one filesystem or one PV)"
 
-if [ -z "$NBD" ]; then
+if [ -z "$NBD" ] && [ "$SAME_IMAGE" = 0 ]; then
   # 1st choice: the kernel scans the partitions (no device-mapper, no udev needed); fallback: kpartx maps
   LOOPDEV=$(losetup --find --show --read-only -P "$RAW" 2>/dev/null) || LOOPDEV=$(losetup --find --show --read-only "$RAW") || die "losetup failed"
   for _ in 1 2 3 4 5; do ls "${LOOPDEV}"p* >/dev/null 2>&1 && break; sleep 0.5; done
@@ -97,7 +123,10 @@ part_dev(){  # partition N -> device node
 list_parts(){ ls "${BASE}"p* /dev/mapper/"$(basename "$BASE")"p* 2>/dev/null || true; }
 echo "== block devices"; lsblk -o NAME,SIZE,FSTYPE,TYPE,RO "$BASE" 2>/dev/null || true
 
-save_state(){ printf 'TARGET=%s\nEWF=%s\nLOOPDEV=%s\nNBD=%s\nVG=%s\nPARTS=%s\n' "$TARGET" "$EWF" "$LOOPDEV" "$NBD" "$VG" "$PARTS" > "$STATE"; }
+save_state(){  # %q: paths with spaces survive being sourced back
+  if [ -n "$AT" ]; then printf 'EXTRA_%s=%q\n' "$(date +%s)" "$MOUNT_AT|$IMG|$LOOPDEV|$NBD|$VG" >> "$STATE"
+  else printf 'TARGET=%q\nEWF=%q\nLOOPDEV=%q\nNBD=%q\nVG=%q\nPARTS=%q\nIMAGE=%q\n' "$TARGET" "$EWF" "$LOOPDEV" "$NBD" "$VG" "$PARTS" "$IMG" > "$STATE"; fi
+}
 cleanup_fail(){ save_state; echo "   (devices left attached so you can inspect them; undo with: $0 --umount)"; }
 
 activate_vg(){  # $1 = VG; sets nothing, exits non-zero on failure with the real LVM message shown
@@ -162,11 +191,12 @@ fi
 FST=$(blkid -o value -s TYPE "$DEV" 2>/dev/null || echo "")
 OPTS="ro,noatime,noexec,nosuid"
 case "$FST" in ext4|ext3) OPTS="$OPTS,noload";; xfs) OPTS="$OPTS,norecovery";; esac
-if ! out=$(mount -t "${FST:-auto}" -o "$OPTS" "$DEV" "$TARGET" 2>&1); then
+if ! out=$(mount -t "${FST:-auto}" -o "$OPTS" "$DEV" "$MOUNT_AT" 2>&1); then
   echo "$out"; cleanup_fail; die "mount of $DEV (${FST:-unknown fs}) failed" 32
 fi
 save_state
-echo "== mounted $DEV ($FST) at $TARGET with $OPTS"
-grep " $TARGET " /proc/mounts
-echo "next: create the case in the UI (mount root $TARGET), then Verify"
+echo "== mounted $DEV ($FST) at $MOUNT_AT with $OPTS"
+grep " $MOUNT_AT " /proc/mounts
+if [ -n "$AT" ]; then echo "next: run Collect (or Re-analyze) again so the added volume is read"
+else echo "next: create the case in the UI (mount root $TARGET), then Verify"; fi
 echo "undo: $0 --umount"

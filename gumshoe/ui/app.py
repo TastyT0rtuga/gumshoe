@@ -277,10 +277,30 @@ with tabs[5]:
     inv = case.read_json("inventory.json", {}) or {}
     aa = inv.get("aapanel") or {}
     if not aa.get("present"):
-        st.info("No aaPanel inventory yet (run collect).")
+        from gumshoe.probe import probe as _probe, explain as _explain
+        cfg_rel = case.cfg["paths"]["panel"].strip("/")
+        if "aapanel" not in inv:
+            st.info("Nothing here yet. This tab is filled by the **normalize** step, which runs last in Collect and in Deep "
+                    "(after UAC, Loki, Chainsaw and the MariaDB review). If a run stopped before that, the Run tab's log says where; "
+                    "**Re-analyze** on the Run tab redoes the normalize step from the tool output already collected.")
+        else:
+            st.warning(f"aaPanel was not found on the mounted evidence when normalize ran (looked for `/{cfg_rel}` under `{case.mount_root}`).")
+            if aa.get("probe"):
+                st.markdown(_explain(aa["probe"], cfg_rel))
+        with st.expander("What is mounted right now?", expanded="aapanel" in inv):
+            live = _probe(case.mount_root, cfg_rel, search=False)
+            st.markdown(_explain(live, cfg_rel))
+            if live.get("entries"):
+                st.caption(f"top level of `{case.mount_root}`: " + ", ".join(live["entries"][:40]))
+            if live.get("separate_volumes"):
+                st.caption("mounted from other volumes on the original server (its /etc/fstab): " +
+                           "; ".join(f"{m['mountpoint']} <- {m['device']} ({m['fstype']})" for m in live["separate_volumes"]))
     else:
-        st.caption("What the panel would show, reconstructed read-only from /www/server/panel/data/default.db and the panel files. "
+        st.caption(f"What the panel would show, reconstructed read-only from {aa.get('path', '/www/server/panel')}/data/default.db and the panel files. "
                    "Credential columns are never read.")
+        pb = aa.get("probe") or {}
+        if pb.get("os") or pb.get("hostname"):
+            st.caption(f"host: {pb.get('os', '')} {('(' + pb['hostname'] + ')') if pb.get('hostname') else ''}")
         s = aa.get("settings") or {}
         st.markdown(f"**Panel:** port `{s.get('port.pl')}` · entrance `{s.get('admin_path.pl')}` · SSL {'on' if 'ssl.pl' in s else 'off'} · "
                     f"IP limit `{s.get('limitip.conf') or 'none'}` · plugins: {', '.join(s.get('plugins', [])[:30])}")
@@ -298,7 +318,7 @@ with tabs[5]:
                 if c.get("sBody"):
                     with st.expander(f"script of '{c.get('name')}' (id {c.get('echo')})"):
                         st.code(c["sBody"])
-                        logp = f"/{case.cfg['paths']['panel_cron'].strip('/')}/{c.get('echo')}.log"
+                        logp = f"{aa.get('cron_path') or '/' + case.cfg['paths']['panel_cron'].strip('/')}/{c.get('echo')}.log"
                         if case.abs(logp).exists():
                             st.caption(f"last output ({logp})")
                             st.code((case.abs(logp).read_text("utf-8", errors="replace"))[-4000:])

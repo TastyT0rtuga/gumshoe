@@ -224,19 +224,34 @@ def vhost_configs(case, panel_rel: str) -> tuple[list[Finding], list[dict[str, A
 
 
 def run(case) -> list[Finding]:
-    panel_rel = case.cfg["paths"]["panel"].strip("/")
+    from ..probe import probe, explain
+    cfg_rel = case.cfg["paths"]["panel"].strip("/")
     cron_rel = case.cfg["paths"]["panel_cron"].strip("/")
     findings: list[Finding] = []
     inv_all = case.read_json("inventory.json", {}) or {}
-    if not case.abs(panel_rel).exists():
-        inv_all["aapanel"] = {"present": False}
+    # the panel is normally at /www/server/panel, but follow it when it lives elsewhere (data disk mounted
+    # at /opt/www, /data/www ...) and, when it is absent, say why (wrong partition mounted, /www on a
+    # separate volume per the image's fstab, another control panel, no /www at all)
+    pr = probe(case.mount_root, cfg_rel)
+    panel_rel = pr.get("panel")
+    if not panel_rel:
+        inv_all["aapanel"] = {"present": False, "looked_for": "/" + cfg_rel, "probe": pr}
         case.write_json("inventory.json", inv_all)
         return [Finding(source="aapanel", severity="info", rule="aapanel.absent",
-                        title="aaPanel directory not found; panel checks skipped", description=f"Looked for /{panel_rel}")]
+                        title="aaPanel directory not found; panel checks skipped",
+                        description=f"Looked for /{cfg_rel}. " + explain(pr, cfg_rel))]
+    if panel_rel != cfg_rel:
+        findings.append(Finding(source="aapanel", severity="info", rule="aapanel.relocated",
+                                title=f"aaPanel found at /{panel_rel} (not at the configured /{cfg_rel})",
+                                description="The panel tree was followed there; its cron scripts are read from the matching server/cron directory."))
+        alt_cron = panel_rel.rsplit("/", 1)[0] + "/cron"
+        if case.abs(alt_cron).is_dir():
+            cron_rel = alt_cron
     f, inv = panel_db(case, panel_rel); findings += f
     findings += panel_cron_scripts(case, cron_rel)
     f2, settings = panel_settings(case, panel_rel); findings += f2
     f3, vh = vhost_configs(case, panel_rel); findings += f3
-    inv_all["aapanel"] = {"present": True, **inv, "settings": settings, "vhosts": vh}
+    inv_all["aapanel"] = {"present": True, "path": "/" + panel_rel, "cron_path": "/" + cron_rel, **inv, "settings": settings, "vhosts": vh,
+                          "probe": {k: pr.get(k) for k in ("os", "hostname", "mysql_datadirs", "web_roots", "separate_volumes", "other_panels")}}
     case.write_json("inventory.json", inv_all)
     return findings

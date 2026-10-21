@@ -159,10 +159,12 @@ def render_mount(root: Path):
     st.caption("Any E01, raw/dd or VHDX. Paste the Windows path (e.g. `C:\\DFIR\\evidence\\server.E01`) or the "
                "WSL path (`/mnt/c/DFIR/evidence/server.E01`). Mounted at `/mnt/evidence` unless changed.")
     img = st.text_input("Image file", key="mount_img", placeholder=r"C:\DFIR\evidence\server.E01")
-    with st.expander("Advanced (only if the automatic pick is wrong)"):
+    with st.expander("Advanced (only if the automatic pick is wrong, or to add a second volume)"):
         part = st.text_input("--part N", key="mount_part")
         lv = st.text_input("--lv VG/LV", key="mount_lv")
         target = st.text_input("--target", value="/mnt/evidence", key="mount_target")
+        at = st.text_input("--at /dir  (mount this volume ON TOP of the already mounted root, e.g. `/www` when the "
+                           "original server kept its panel and sites on a data disk; needs --part or --lv)", key="mount_at")
     c1, c2, c3 = st.columns([1, 1, 3])
     script = str(root / "setup" / "wsl" / "mount_image.sh")
     if c1.button("Mount read-only", type="primary"):
@@ -174,16 +176,41 @@ def render_mount(root: Path):
             if part.strip(): cmd += ["--part", part.strip()]
             if lv.strip(): cmd += ["--lv", lv.strip()]
             if target.strip(): cmd += ["--target", target.strip()]
+            if at.strip(): cmd += ["--at", at.strip()]
             with st.spinner("mounting..."):
                 rc, out = _run(cmd)
             (st.success if rc == 0 else st.error)(("mounted" if rc == 0 else "mount failed") + f" (exit {rc})")
             st.code(out or "(no output)")
+            if rc == 0:
+                st.session_state["mount_check"] = True
     if c2.button("Unmount"):
         rc, out = _run(["bash", script, "--umount"])
         (st.success if rc == 0 else st.warning)(out or f"exit {rc}")
     mp = (st.session_state.get("mount_target") or "/mnt/evidence").strip()
     if Path(mp).is_dir() and any(Path(mp).iterdir()):
-        st.info(f"`{mp}` currently has content: " + ", ".join(sorted(p.name for p in Path(mp).iterdir())[:12]))
+        render_evidence_check(mp, expanded=bool(st.session_state.pop("mount_check", False)))
+
+
+def render_evidence_check(mp: str, expanded: bool = False, panel_rel: str = "www/server/panel"):
+    """Right after a mount: is this a Linux root filesystem, which OS/host, is aaPanel on it (or on another
+    volume per the image's fstab), where the database and web roots are. Catches the wrong partition and a
+    panel that lives on a data disk before any time is spent on Collect."""
+    from gumshoe.probe import probe, explain
+    with st.expander(f"What is on `{mp}`?", expanded=expanded):
+        with st.spinner("looking at the mounted filesystem..."):
+            r = probe(mp, panel_rel)
+        if r.get("error"):
+            st.error(r["error"]); return
+        if not r.get("is_rootfs"):
+            st.error(explain(r, panel_rel))
+        elif r.get("panel"):
+            st.success(explain(r, panel_rel))
+        else:
+            st.warning(explain(r, panel_rel))
+        st.caption("top level: " + ", ".join(r.get("entries", [])[:40]))
+        if r.get("separate_volumes"):
+            st.caption("the original server also mounted (its /etc/fstab): " +
+                       "; ".join(f"{m['mountpoint']} <- {m['device']} ({m['fstype']})" for m in r["separate_volumes"]))
 
 
 def render_new_case(cases_root: Path, cfg: dict, compact: bool = False):
@@ -220,6 +247,31 @@ def render_new_case(cases_root: Path, cfg: dict, compact: bool = False):
         st.success(f"created {c.dir}")
         time.sleep(0.5)
         st.rerun()
+
+
+def render_outcome(case):
+    """One line under a finished Collect/Deep/Re-analyze: how many findings, and whether the panel, the
+    database and the web roots were actually found - so an empty Panel tab is explained here, where
+    the examiner is looking, not three tabs away."""
+    summ = case.read_json("summary.json", {}) or {}
+    inv = case.read_json("inventory.json", {}) or {}
+    bits = []
+    if summ.get("total") is not None:
+        sev = summ.get("by_severity") or {}
+        bits.append(f"**{summ.get('total')} findings** (" + ", ".join(f"{k} {v}" for k, v in sev.items() if v) + ")")
+    aa = inv.get("aapanel")
+    if aa is None:
+        bits.append("panel: normalize did not run (see the log)")
+    elif aa.get("present"):
+        bits.append(f"aaPanel: found at `{aa.get('path', '/www/server/panel')}` ({len(aa.get('sites') or [])} sites, {len(aa.get('databases') or [])} databases, {len(aa.get('panel_cron') or [])} tasks)")
+    else:
+        bits.append("**aaPanel: not found on this volume** - see the Panel tab for where it looked and why")
+    db = case.read_json("dbreview.json", {}) or {}
+    if db.get("datadir"):
+        srv = db.get("server_version") or ""
+        bits.append(f"MariaDB data: `/{str(db['datadir']).strip('/')}`" + (f" (reviewed with {srv})" if srv else " (static inventory only)"))
+    if bits:
+        st.markdown(" · ".join(bits))
 
 
 def any_running(case_dir: Path) -> list[str]:
@@ -278,6 +330,8 @@ def _render_steps(case, root: Path, cases_root: Path):
             st.rerun(scope="app")
         if b2.button("Refresh", key=f"refresh_{step}"):
             st.rerun(scope="app")
+        if status == "done" and step in ("collect", "deep", "reanalyze"):
+            render_outcome(case)
         if state:
             with st.expander(f"log: logs/{step}.log  (started {state.get('started')})", expanded=(status == "running")):
                 st.code(tail_log(case.dir, step) or "(empty)")

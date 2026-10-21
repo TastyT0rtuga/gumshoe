@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Evidence probe (`gumshoe/probe.py`): right after a mount, and under a finished Collect/Deep, the UI
+  says whether the volume is a Linux root filesystem (OS, hostname), whether aaPanel is on it and
+  where, whether the original server kept `/www` (or `/home`, `/var/lib/mysql`) on another volume
+  per its `/etc/fstab`, which other control panels are present, and where the database and web roots
+  are. The aaPanel normalizer follows a relocated panel (`/opt/www`, `/data/www`, a data disk ...;
+  finding `aapanel.relocated`) and, when the panel is absent, the `aapanel.absent` finding and the
+  Panel tab explain why instead of showing nothing.
+- `mount_image.sh --at /www` mounts a second volume (same image: `--lv`/`--part`, or another image,
+  e.g. a data disk) on top of the mounted root; `--umount` takes everything down (`umount -R`).
+  State values are shell-quoted, so paths with spaces survive.
 - Offline bundle for air-gapped sandboxes (`setup/offline/`): `Gumshoe.bat` first-run installer and launcher, `wsl_provision.sh` (local apt repository + wheels, validated against a pristine Ubuntu 24.04 rootfs), `docs/OFFLINE-BUNDLE.md`.
 - Shell-history review for every account (root, users, service accounts with a home): inventory
   plus per-line findings for account changes, log handling, compiling, history suppression and the

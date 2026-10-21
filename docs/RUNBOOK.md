@@ -69,6 +69,10 @@ Do not go past this line until step 12 is all OK.
     mounts it at `/mnt/evidence` with `ro,noatime,noexec,nosuid,noload`. It also takes an E01 directly
     (`sudo setup/wsl/mount_image.sh /mnt/d/case/server.E01`, no Arsenal needed) or a VHDX. Use
     `--part N` / `--lv VG/LV` when it picks wrong; `sudo setup/wsl/mount_image.sh --umount` undoes it.
+    The UI's "What is on /mnt/evidence?" box (shown right after a mount) tells you whether this is the
+    root filesystem, which OS/host it is, and whether aaPanel is on it. If the original server kept
+    `/www` on a data disk (its `/etc/fstab` says so and `/www` is empty), add that volume on top:
+    `sudo setup/wsl/mount_image.sh <same-or-other-image> --part N|--lv VG/LV --at /www`, then Collect.
     The long way, if you prefer to see each step: `lsblk` → find the new device (e.g. `sdc` with
     partitions `sdc1`, `sdc2`). The Ubuntu root is usually the largest ext4 partition. Then:
     `sudo mkdir -p /mnt/evidence && sudo mount -o ro,noload,noexec,nosuid /dev/sdcN /mnt/evidence`
