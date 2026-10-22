@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Launcher: a bundle on a drive WSL has not mounted (a USB drive plugged in after WSL started, a mapped drive) no
+  longer stops Gumshoe.bat / the self-test with `wslpath failed for H:\Gumshoe-offline`: the drive is mounted into
+  the distro with drvfs first.
 - **Databases to CSV: fixes for the 12 GB dump that "gave nothing back".** (1) Export folders were named after the
   source's path truncated to 60 characters, so nine dumps under one long case path shared one folder and each
   extraction wiped the previous one - the 12 GB dump's tables were deleted by the 368-byte migration extracted

@@ -90,12 +90,24 @@ function Test-WslDistro([string]$Name) {
   try { $list = (& wsl.exe -l -q 2>$null) -join "`n"; return ($list -match "(?m)^\s*$([regex]::Escape($Name))\s*$") } catch { return $false }
 }
 
-# Windows path -> what the distro sees (C:\x -> /mnt/c/x). Needs a running wsl.exe.
+# Windows path -> what the distro sees (C:\x -> /mnt/c/x). Needs a running wsl.exe. A drive WSL has not mounted
+# (a USB drive plugged in after WSL started, a drive added later, a mapped network drive) is mounted into the
+# distro with drvfs first - the bundle may well live on such a drive when C: is full.
 function ConvertTo-WslPath([string]$Name, [string]$WinPath) {
   $p = ($WinPath -replace '\\', '/').TrimEnd('/')
   $out = & wsl.exe -d $Name -u root -- wslpath -u $p 2>$null
-  if ($LASTEXITCODE -ne 0 -or -not $out) { throw "wslpath failed for $WinPath" }
-  return ($out | Select-Object -First 1).Trim()
+  if ($LASTEXITCODE -eq 0 -and $out) { return ($out | Select-Object -First 1).Trim() }
+  if ($p -match '^([A-Za-z]):(/.*)?$') {
+    $d = $Matches[1].ToLower(); $rest = $Matches[2]
+    $drive = $Matches[1].ToUpper() + ":"
+    & wsl.exe -d $Name -u root -- sh -c "mountpoint -q /mnt/$d || (mkdir -p /mnt/$d && mount -t drvfs $drive /mnt/$d)" 2>$null | Out-Null
+    $out = & wsl.exe -d $Name -u root -- wslpath -u $p 2>$null
+    if ($LASTEXITCODE -eq 0 -and $out) { return ($out | Select-Object -First 1).Trim() }
+    & wsl.exe -d $Name -u root -- test -d "/mnt/$d$rest" 2>$null
+    if ($LASTEXITCODE -eq 0) { return "/mnt/$d$rest" }
+    throw "the distro cannot see $WinPath (drive $drive is not mounted inside WSL and could not be mounted with drvfs). Run  wsl --shutdown  and double-click again; if the drive is a network drive, map it in Windows first."
+  }
+  throw "wslpath failed for $WinPath"
 }
 
 # Make sure the distro can talk to Ollama on Windows: 127.0.0.1 with mirrored networking, otherwise the
