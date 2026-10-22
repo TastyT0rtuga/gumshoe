@@ -2,6 +2,54 @@
 
 ## Unreleased
 
+- **Second review round (DeepSeek, Gemini) - fixes** (peer-review brief, section 10).
+  Dump reader: (1) the string grammar follows the dump's escape mode - `NO_BACKSLASH_ESCAPES`, PostgreSQL, T-SQL and
+  SQLite dumps (backslash literal, quotes doubled) are detected from their markers or from the escapes seen and read
+  with the right grammar, so `'C:\Users\'` no longer costs the row; the log says which mode was taken and why.
+  (2) Comments inside VALUES (`/* ) */` between values, `-- ` and `#` between rows) are whitespace, never part of a
+  value and never the end of a row. (3) Character-set introducers of any charset (`_utf8mb4'…'`, `_latin1"…"`,
+  `_binary 0x…`), `N"…"` and parenthesised expressions `(-1)` are one value each (an `_utf8mb4` introducer used to
+  split into two columns, shifting the row). (4) A row whose number of values differs from the table's columns goes
+  to `<table>.rejected.csv` and is counted (`rejected` in tables.csv and the Databases tab) instead of being written
+  shifted; an INSERT with its own column list is mapped onto the table's columns by name. (5) Trigger, procedure,
+  function and event bodies (`DELIMITER ;;` regions and single-statement routines) are skipped whole: an `INSERT INTO
+  audit_log` inside a trigger body is no longer written as rows of `audit_log`; the parallel scanner honours the same
+  regions. (6) The parallel scanner mis-tokenised a string that crossed its 8 MB read boundary and could place a
+  split point inside it - on a 38 MB fixture of 100 KB cells holding `;` and `INSERT INTO` text, build m lost 33 of
+  400 rows and invented a 1,042-row table with a clean "done"; it now reads on until the string closes. (7) Spilled
+  cells of parallel parts are named uniquely (`w00.row1.col.txt`), so two workers' row 1 no longer overwrite each
+  other. (8) `INSERT … SET` / `INSERT … SELECT` are counted and noted, not reported as malformed; the export README
+  says how to open the CSVs in Excel without losing digits. (9) The 4 MB boundary falling between `,` and `\n(` of a
+  multi-line INSERT is handled (it would have cost a row); all of it under 7-byte to 64 KB read chunks in the
+  battery (27 fixtures, sequential and parallel).
+  Players: (10) identifiers found in free text (a note saying "referred by bob@x") never merge account rows - they
+  link; foreign-key joins (`accounts.user_id → users`) merge only when the key resolves: at least half of the sampled
+  values must find a row of the target table, or the column is left unjoined and the log says so. (11) A transaction
+  row naming two players (sender and receiver, merchant and customer) is attributed to neither: it is counted,
+  listed in `unattributed_money.csv` and shown in both dossiers; a row reached only through a wallet *linked* to a
+  player by co-occurrence (possibly a counterparty's address) is attributed but marked `linked` in transactions.csv
+  and the dossier. (12) Per-table caps keep the first half and the last half of a table (the newest rows survive),
+  reported as "kept the first N and the last N of M"; a wallet on more than 10 account rows is not glue. (13) The
+  Players tab says what a player is: a cluster of account rows, not a head count.
+  Private database server: (14) runs inside a mount namespace where every mount is read-only except its own work
+  folder and the overlay - a seized datadir naming an absolute path (a tablespace, a log file, `DATA DIRECTORY`)
+  cannot write into the case folder, the exports, a Windows drive or a share; the custody record says whether the
+  sandbox was in effect. `--persisted-globals-load=OFF` (MySQL 8 no longer reads the datadir's `mysqld-auto.cnf`),
+  `--skip-symbolic-links`, `--secure-file-priv` confined to the work folder; the overlay is checked in /proc/mounts
+  before the server starts; MySQL 8's error messages found under Ubuntu's share/mysql.
+  Fingerprint: (15) symlinks inside the image are followed inside the image - an absolute target such as
+  `/etc/nginx/sites-available/x`, `/lib/systemd/system/y.service` or a docroot `/www/wwwroot/site → /data/site`
+  used to be looked up on the examiner's own system and dropped; (16) the composition walk counts regular files only
+  (symlinks, FIFOs, sockets skipped) and says when its percentages come from a capped sample; (17) a candidate matched
+  by directory and file names alone stays below 50 % and says "path checks only"; aaPanel/BT Panel ties are reported
+  as ties.
+  Custody: (18) every record's head (seq + hash) is also appended to an anchor file outside the case folder
+  (`<cases root>/../custody-anchors/<case>.jsonl`); `gumshoe custody` now fails on a truncated or consistently
+  rewritten chain and prints the head to write into the examiner's notes; the head is written into players'
+  `export.json` / `MANIFEST.txt`, every db export's `source.json` and the report header. (19) A report on an image
+  that was never compared with an acquisition hash says NOT VERIFIED in its header, not "not compared".
+  Rescue: (20) `Gumshoe-Rescue.bat` checks the disk read-only first (`e2fsck -n`), leaves a clean disk alone, and
+  copies the distro's disk file to the drive with the most room before any repair (`-NoBackup` to skip the copy).
 - **Fixes from the independent review of the dump reader and Players** (peer-review brief, section 9).
   (1) The row pattern could take hours on a row with an unbalanced quote or a cell of thousands of
   backslashes (exponential backtracking, re-run at every retry); it is now linear (possessive quantifiers)

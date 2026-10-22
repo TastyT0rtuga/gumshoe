@@ -166,12 +166,21 @@ tables over 1,000,000 rows split into `.partNNN.csv`, binary values too big for 
 
 How: a data directory is never copied or written - a private MariaDB (or the bundled MySQL 8.0 engine for
 8.0 layouts) runs over an overlay, so crash recovery of a live-imaged server happens in the work folder,
-and every table is streamed out. Dumps are read as a byte stream straight to CSV (several processes on big
+and every table is streamed out. That server runs inside a mount namespace where everything is read-only
+except its own work folder and the overlay (a seized datadir that names an absolute path - a tablespace, a
+log file, `DATA DIRECTORY` - cannot write into the case folder, the exports, a Windows drive or a share),
+with plugins, UDFs, persisted settings and symlinked tables disabled; the custody record says whether the
+sandbox was in effect. Dumps are read as a byte stream straight to CSV (several processes on big
 plain files): a 12 GB dump, a table kept on one multi-GB line or one INSERT with millions of rows all run in a
 few hundred MB of memory. Dialects: mysqldump, phpMyAdmin, Navicat/HeidiSQL/SQLyog/Workbench, PostgreSQL
 `--inserts`, T-SQL scripts (`[dbo].[t]`, `N'...'`, `GO`), doubled or backslash-escaped quotes, statements with
-or without `;`. A cell longer than Excel's limit (32,767 characters) is saved as `<table>.blobs\rowN.column.txt`
-with a pointer in the cell; binary cells likewise. Each source gets its own folder named `<parent>-<file>-<hash>`
+or without `;`. The escape mode is read from the dump: a `NO_BACKSLASH_ESCAPES`, PostgreSQL, T-SQL or SQLite dump
+(backslash literal, quotes doubled) is parsed as such, and the log says which mode was taken and why. Comments
+inside a VALUES list are whitespace; trigger/procedure bodies are skipped whole (an `INSERT` inside a trigger is
+never written as data). A cell longer than Excel's limit (32,767 characters) is saved as
+`<table>.blobs\rowN.column.txt` with a pointer in the cell; binary cells likewise. A row whose number of values
+differs from the table's columns is kept in `<table>.rejected.csv` and counted (`rejected` in tables.csv) - never
+written shifted into the table. Each source gets its own folder named `<parent>-<file>-<hash>`
 (`db-dump_sw.sql-341566`), so dumps that share a long path never overwrite each other. The extraction log says
 what the reader recognised (INSERTs, CREATE TABLEs, other statements skipped, malformed); if a `.sql` yields 0
 tables, send its first lines (`head -c 2000`) so the dialect can be added. A row the reader cannot make sense
@@ -233,14 +242,18 @@ document path) so you can go and look.
   numbers (Luhn-checked), SSH key fingerprints, usernames, names, domains, URLs - each validated, normalised
   (`+1 (555) 010-0100` and `15550100100` are one phone), with counts, first/last seen, and where.
 - **Players**: account-like rows (a row holding an e-mail or username plus a name/phone/password hash) are
-  merged only over **strong** identifiers - e-mail, phone, wallet, IBAN, card, SSH key. Never over IPs,
-  usernames, names, password hashes or transaction ids (shared infrastructure must not fuse people; two
-  accounts with the same default hash are two accounts; a txid sits on both sides of a trade) - those
-  **link** players without merging them. An identifier seen in too many account rows (an e-mail in more
-  than 50, a phone in more than 20: a placeholder, a support line) merges nothing. Every dossier shows
-  **Merged over**: the identifier and the exact rows it joined - check it before relying on the merge.
-  Foreign keys are followed: `logins.customer_id` joins the customer, so the login's IP and time belong
-  to the player.
+  merged only over **strong** identifiers - e-mail, phone, wallet, IBAN, card, SSH key - found in the row's own
+  typed columns or reached through a validated foreign key. Never over IPs, usernames, names, password hashes
+  or transaction ids (shared infrastructure must not fuse people; two accounts with the same default hash are
+  two accounts; a txid sits on both sides of a trade), and never over an identifier found in free text (a note
+  saying "referred by bob@x" links Bob, it does not fuse him) - those **link** players without merging them. An
+  identifier seen in too many account rows (an e-mail in more than 50, a phone in more than 20, a wallet in more
+  than 10: a placeholder, a support line, a payout address) merges nothing. Every dossier shows **Merged over**:
+  the identifier and the exact rows it joined - check it before relying on the merge. A player is a cluster of
+  account rows, not a head count: one person with two e-mails is two players until something joins them.
+  Foreign keys are followed when they resolve: `logins.customer_id` joins the customer (so the login's IP and
+  time belong to the player) only if at least half of the sampled key values find a customer row; otherwise
+  the column is left unjoined and the log says so.
 - **Linked / shared**: IPs, domains, wallets, names reached through rows and log lines carrying the player's
   strong identifiers; an IP used by 8 or more players is marked **shared** (proxy, NAT, the office) instead
   of being treated as that player's.
@@ -248,17 +261,24 @@ document path) so you can go and look.
   (days above 4× the median), new account rows per month, IPs by number of players, and the most active
   identifiers of the last week in the data.
 - **Money**: rows of transaction-like tables (an amount plus a wallet/txid/account reference) summed per
-  player and per currency, each row attributed through the identifiers on it; every wallet with its
-  mentions and the players holding it.
+  player and per currency. A row is attributed only when it names exactly one player; a row naming two
+  (sender and receiver, merchant and customer) is attributed to neither - it is counted, listed in
+  `unattributed_money.csv` and shown in both dossiers. A row reached only through a wallet *linked* to a
+  player by co-occurrence (possibly a counterparty's address, not an account row's) is attributed but marked
+  `linked` in transactions.csv and in the dossier's money line. Every wallet with its mentions and the players
+  holding it.
 
 What comes out, under `<exports>\<case>\players\` (Excel-ready): `players.csv`, `entities.csv`,
-`links.csv`, `wallets.csv`, `transactions.csv`, `activity.csv` and `dossiers\player-NNNNN.md` (one
+`links.csv`, `wallets.csv`, `transactions.csv`, `unattributed_money.csv`, `activity.csv`, `MANIFEST.txt`
+(with the custody head at export time) and `dossiers\player-NNNNN.md` (one
 Markdown dossier per player: identifiers, links, timeline, money, source rows). The dossiers are also
 indexed for Ask, so "what do we know about ivan.petrov@mail.ru" cites `players://12`.
 
 Look up an identifier (second sub-tab) to pivot on anything: where it appears, what it co-occurs with,
-which players hold it. Tables are scanned in parallel; a table with more than 4,000,000 distinct
-identifiers is capped (the log says so) - rare outside raw traffic logs.
+which players hold it. Tables are scanned in parallel; a table with more than 3,000,000 distinct
+identifiers is capped (the log says so) - rare outside raw traffic logs; account and transaction rows of a
+very big table are capped by keeping its first half and its last half (the newest rows survive), and the
+log says "kept the first N and the last N of M".
 
 ### Findings: read, mark, export
 
@@ -276,7 +296,10 @@ record.
 24. Open the report. For every critical and high finding, open the cited file in the image
     (`less /mnt/evidence/<path>`) and confirm the excerpt is really there.
 25. Every AI-narrative block: read each sentence against its cited findings; delete anything you cannot confirm.
-26. `gumshoe custody --case CASE-001 --show 100` → must print `OK   chain intact`.
+26. `gumshoe custody --case CASE-001 --show 100` → must print `OK   chain intact ... matches the anchor` and the
+    chain head (record number and hash): write the head into your notes. The anchor is a second copy of every
+    record's head outside the case folder (`/opt/dfir/custody-anchors/<case>.jsonl`); a chain that was truncated
+    or rewritten in place fails this check. The head also sits in every export's manifest and in the report.
 27. `gumshoe archive --case CASE-001 --verify` → `"ok": true`.
 28. Fill in the attestation table in the methodology note (versions from `03_verify_offline.sh` output and
     `custody.log`; dates from `case.json`).

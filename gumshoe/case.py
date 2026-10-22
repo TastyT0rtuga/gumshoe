@@ -199,7 +199,9 @@ class Case:
         self.cfg = cfg
         self.meta_path = self.dir / "case.json"
         self.meta: dict[str, Any] = json.loads(self.meta_path.read_text("utf-8")) if self.meta_path.exists() else {}
-        self.custody = CustodyLog(self.dir / "custody.log", actor=self.meta.get("examiner") or "gumshoe")
+        # the anchor lives outside the case folder: <cases root>/../custody-anchors/<case>.jsonl (/opt/dfir/custody-anchors on the sandbox)
+        self.custody = CustodyLog(self.dir / "custody.log", actor=self.meta.get("examiner") or "gumshoe",
+                                  anchor=self.dir.parent.parent / "custody-anchors" / f"{self.dir.name}.jsonl")
         for sub in ("collected/raw", "collected/jsonl", "index", "evidence", "reports"):
             (self.dir / sub).mkdir(parents=True, exist_ok=True)
 

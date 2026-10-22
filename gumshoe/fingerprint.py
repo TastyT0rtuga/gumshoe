@@ -37,6 +37,7 @@ import sys
 import time
 from collections import Counter, defaultdict
 from pathlib import Path
+from stat import S_ISREG as _S_ISREG
 from typing import Any, Callable, Iterator, Optional
 
 from .integrity import utc_now
@@ -58,6 +59,56 @@ READ_LIMIT = 64 * 1024         # text indicators read this much of a file
 # Candidates: name, kind (panel|framework|admin|cms|app|runtime|pattern), indicators, optional version files.
 
 
+# ---- paths inside the evidence. A symlink in a seized image points where it pointed on the seized machine: an absolute
+# target (/etc/nginx/sites-available/x, /lib/systemd/system/y.service, /data/www/site) must be followed under the
+# evidence root, not on the examiner's own system - Path.resolve()/open() would do the latter and lose the file.
+_EVIDENCE_ROOT: Optional[Path] = None
+
+
+def set_root(root: Optional[Path]) -> None:
+    global _EVIDENCE_ROOT
+    _EVIDENCE_ROOT = Path(root).resolve() if root else None
+
+
+def inroot(p: Path, root: Optional[Path] = None, hops: int = 40) -> Optional[Path]:
+    """`p` with every symlink on its way followed inside the evidence root; None when it leaves the root, loops, or
+    cannot be read. Outside a root (plain host paths) the path is returned as it is."""
+    root = Path(root).resolve() if root else _EVIDENCE_ROOT
+    if root is None:
+        return p
+    try:
+        rel = Path(os.path.abspath(p)).relative_to(root)
+    except ValueError:
+        return p if not str(p).startswith(str(root)) else None
+    cur = root
+    rs = str(root)
+    for part in rel.parts:
+        cur = cur / part
+        n = 0
+        while os.path.islink(cur):
+            try:
+                target = os.readlink(cur)
+            except OSError:
+                return None
+            cur = Path(os.path.normpath((root / target.lstrip("/")) if target.startswith("/") else (cur.parent / target)))
+            if not (str(cur) == rs or str(cur).startswith(rs + "/")):
+                return None
+            n += 1
+            if n > hops:
+                return None
+    return cur
+
+
+def _is_file(p: Path) -> bool:
+    q = inroot(p)
+    return q is not None and q.is_file()
+
+
+def _is_dir(p: Path) -> bool:
+    q = inroot(p)
+    return q is not None and q.is_dir()
+
+
 def _glob(root: Path, pat: str, limit: int = 5) -> list[str]:
     out = []
     try:
@@ -71,9 +122,9 @@ def _glob(root: Path, pat: str, limit: int = 5) -> list[str]:
 
 
 def _text(root: Path, rel: str) -> str:
-    p = root / rel
+    p = inroot(root / rel, root)
     try:
-        if not p.is_file() or p.stat().st_size > 50 * 2**20:
+        if p is None or not p.is_file() or p.stat().st_size > 50 * 2**20:      # is_file: regular files only (a FIFO would block open)
             return ""
         with open(p, "rb") as f:
             return f.read(READ_LIMIT).decode("utf-8", errors="replace")
@@ -96,10 +147,10 @@ class Ctx:
         """(matched, evidence text, version or None)."""
         kind, target, w = ind[0], ind[1], ind[2]
         if kind == "d":
-            ok = (self.root / target).is_dir()
+            ok = _is_dir(self.root / target)
             return ok, f"dir {target}", None
         if kind == "f":
-            ok = (self.root / target).is_file()
+            ok = _is_file(self.root / target)
             return ok, f"file {target}", None
         if kind == "g":
             hits = _glob(self.root, target)
@@ -139,12 +190,15 @@ def score(ctx: Ctx, candidates: list[dict[str, Any]], min_pct: int = 15) -> list
         strong = 0
         matched, missed = [], []
         ver = None
+        content_hit = False
         for i in c["ind"]:
             ok, ev, v = ctx.check(i)
             if ok:
                 got += i[2]
                 strong = max(strong, i[2])
                 matched.append(ev)
+                if i[0] in ("t", "pkg", "npm", "py"):
+                    content_hit = True
                 if v and not ver:
                     ver = v
             else:
@@ -154,10 +208,17 @@ def score(ctx: Ctx, candidates: list[dict[str, Any]], min_pct: int = 15) -> list
         pct = int(round(100 * got / total)) if total else 0
         if pct < min_pct or (len(matched) == 1 and strong < 3):
             continue
+        note = c.get("note", "")
+        has_content_ind = any(i[0] in ("t", "pkg", "npm", "py") for i in c["ind"])
+        if has_content_ind and not content_hit and pct >= 50:
+            # directories and file names alone (app/, config/, public/) fit several frameworks: without one content or
+            # package indicator the score stays below the half mark and says so
+            pct = 49
+            note = (note + "; " if note else "") + f"path checks only ({len(matched)} of {len(c['ind'])}), no content or package evidence matched"
         d = {"name": c["name"], "kind": c.get("kind", ""), "pct": pct, "version": ver, "matched": matched, "missed": missed[:12],
              "weight": got, "of": total}
-        if c.get("note"):
-            d["note"] = c["note"]
+        if note:
+            d["note"] = note
         out.append(d)
     out.sort(key=lambda d: (-d["pct"], -d["weight"], d["name"]))
     return out
@@ -410,7 +471,7 @@ def vhost_roots(root: Path) -> list[dict[str, Any]]:
         files: list[Path] = []
         for g in globs:
             try:
-                files += [p for p in root.glob(g) if p.is_file()][:400]
+                files += [p for p in root.glob(g) if _is_file(p)][:400]
             except (OSError, ValueError):
                 continue
         for f in files[:1500]:
@@ -433,7 +494,7 @@ def vhost_roots(root: Path) -> list[dict[str, Any]]:
                 if key in seen or not r.startswith("/"):
                     continue
                 seen.add(key)
-                out.append({"docroot": r, "domains": domains, "conf": str(f.relative_to(root)), "server": kind, "exists": (root / r.lstrip("/")).is_dir()})
+                out.append({"docroot": r, "domains": domains, "conf": str(f.relative_to(root)), "server": kind, "exists": _is_dir(root / r.lstrip("/"))})
             for p in dict.fromkeys(proxies):
                 out.append({"docroot": None, "proxy_pass": p, "domains": domains, "conf": str(f.relative_to(root)), "server": kind, "exists": False})
             if len(out) >= 2000:
@@ -500,7 +561,7 @@ def custom_units(root: Path) -> list[dict[str, Any]]:
             continue
         try:
             for u in sorted(p.iterdir())[:800]:
-                if not u.is_file() or not u.name.endswith(".service") or _STD_UNITS.match(u.name):
+                if not _is_file(u) or not u.name.endswith(".service") or _STD_UNITS.match(u.name):
                     continue
                 txt = _text(root, str(u.relative_to(root)))
                 ex = re.search(r"^\s*ExecStart\s*=\s*(.+)$", txt, re.M)
@@ -519,6 +580,7 @@ def composer_packages(app: Path) -> dict[str, str]:
     pk: dict[str, str] = {}
     inst = app / "vendor" / "composer" / "installed.json"
     try:
+        inst = inroot(inst) or inst
         if inst.is_file() and inst.stat().st_size < 60 * 2**20:
             d = json.loads(inst.read_text("utf-8", errors="replace"))
             items = d.get("packages") if isinstance(d, dict) else d
@@ -529,6 +591,7 @@ def composer_packages(app: Path) -> dict[str, str]:
         pass
     cj = app / "composer.json"
     try:
+        cj = inroot(cj) or cj
         if cj.is_file() and cj.stat().st_size < 2**20:
             d = json.loads(cj.read_text("utf-8", errors="replace"))
             for sec in ("require", "require-dev"):
@@ -546,6 +609,7 @@ def npm_packages(app: Path) -> dict[str, str]:
     pk: dict[str, str] = {}
     for pj in (app / "package.json", app / "web" / "package.json", app / "frontend" / "package.json", app / "client" / "package.json", app / "admin" / "package.json"):
         try:
+            pj = inroot(pj) or pj
             if pj.is_file() and pj.stat().st_size < 2**20:
                 d = json.loads(pj.read_text("utf-8", errors="replace"))
                 for sec in ("dependencies", "devDependencies"):
@@ -562,6 +626,7 @@ def py_packages(app: Path) -> dict[str, str]:
     pk: dict[str, str] = {}
     for rq in (app / "requirements.txt", app / "requirements" / "base.txt", app / "Pipfile", app / "pyproject.toml"):
         try:
+            rq = inroot(rq) or rq
             if rq.is_file() and rq.stat().st_size < 2**20:
                 for line in rq.read_text("utf-8", errors="replace").splitlines()[:2000]:
                     m = re.match(r"^\s*([A-Za-z0-9_.\-]+)\s*(?:[=<>!~]+\s*([^\s;#]+))?", line)
@@ -624,8 +689,10 @@ def composition(app: Path, max_files: int = MAX_FILES, budget_s: float = WALK_BU
                 if lang is None:
                     lang = "media/other" if ext in MEDIA_EXT or not ext else "other"
             try:
-                st = os.stat(os.path.join(dirpath, fn))
+                st = os.lstat(os.path.join(dirpath, fn))
             except OSError:
+                continue
+            if not _S_ISREG(st.st_mode):          # symlinks (they point into the seized machine's tree), FIFOs, sockets, devices: not code
                 continue
             all_b[lang] += st.st_size; all_n[lang] += 1
             if not in_vendor:
@@ -647,7 +714,8 @@ def composition(app: Path, max_files: int = MAX_FILES, budget_s: float = WALK_BU
         return [{"language": k, "bytes": v, "files": c[k], "pct_bytes": round(100 * v / tb, 1), "pct_files": round(100 * c[k] / tn, 1)}
                 for k, v in sorted(code_b.items(), key=lambda x: -x[1])]
     newest.sort(reverse=True)
-    return {"files_seen": n, "capped": capped, "all": pct_table(all_b, all_n), "own": pct_table(own_b, own_n),
+    return {"files_seen": n, "capped": capped, "note": (f"percentages from the first {n} files walked ({'file limit' if n > max_files else 'time budget'} reached): a sample, not the whole tree" if capped else ""),
+            "all": pct_table(all_b, all_n), "own": pct_table(own_b, own_n),
             "other_bytes": {k: v for k, v in all_b.items() if k in ("media/other", "other", "Config/data")},
             "newest_code": [{"mtime": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(m)), "path": p} for m, p in newest[:15]],
             "ui_kits": [{"kit": k, "files": v} for k, v in kits.most_common(12)]}
@@ -662,14 +730,14 @@ NESTED_MARKERS = ("composer.json", "wp-config.php", "artisan", "think", "package
 
 def _is_app_root(p: Path) -> bool:
     try:
-        return p.is_dir() and any((p / m).is_file() for m in APP_MARKERS)
+        return _is_dir(p) and any(_is_file(p / m) for m in APP_MARKERS)
     except OSError:
         return False
 
 
 def app_root_of(docroot: Path) -> Path:
     """The application root for a document root: the parent when the docroot is `public`/`web`/... of a framework tree."""
-    if docroot.name in DOCROOT_NAMES and _is_app_root(docroot.parent) and not (docroot / "composer.json").exists() and not (docroot / "wp-config.php").exists():
+    if docroot.name in DOCROOT_NAMES and _is_app_root(docroot.parent) and not _is_file(docroot / "composer.json") and not _is_file(docroot / "wp-config.php"):
         return docroot.parent
     return docroot
 
@@ -680,11 +748,8 @@ def discover_app_roots(root: Path, vhosts: list[dict[str, Any]], max_roots: int 
     found: dict[str, dict[str, Any]] = {}
 
     def add(p: Path, how: str, domains: Optional[list[str]] = None, conf: Optional[str] = None, docroot: Optional[Path] = None):
-        try:
-            p = p.resolve()
-        except OSError:
-            return
-        if not p.is_dir():
+        p = inroot(p, root)              # a docroot that is a symlink (/www/wwwroot/site -> /data/site) is followed inside the image
+        if p is None or not p.is_dir():
             return
         try:
             rel = "/" + str(p.relative_to(root.resolve()))
@@ -694,7 +759,12 @@ def discover_app_roots(root: Path, vhosts: list[dict[str, Any]], max_roots: int 
         if e is None:
             if len(found) >= max_roots:
                 return
-            e = found[rel] = {"root": rel, "docroot": ("/" + str(docroot.resolve().relative_to(root.resolve()))) if docroot else rel, "domains": [], "confs": [], "how": how}
+            dr = inroot(docroot, root) if docroot else None
+            try:
+                drel = ("/" + str(dr.relative_to(root.resolve()))) if dr else rel
+            except ValueError:
+                drel = rel
+            e = found[rel] = {"root": rel, "docroot": drel, "domains": [], "confs": [], "how": how}
         for d in domains or []:
             if d not in e["domains"]:
                 e["domains"].append(d)
@@ -712,11 +782,11 @@ def discover_app_roots(root: Path, vhosts: list[dict[str, Any]], max_roots: int 
     for lay in layouts:
         if "*" in lay:
             try:
-                cands = [p for p in root.glob(lay) if p.is_dir()][:300]
+                cands = [p for p in root.glob(lay) if _is_dir(p)][:300]
             except (OSError, ValueError):
                 continue
         else:
-            cands = [root / lay] if (root / lay).is_dir() else []
+            cands = [root / lay] if _is_dir(root / lay) else []
         for c in cands:
             if c.name in (".", "..") or c.name.startswith("."):
                 continue
@@ -726,7 +796,7 @@ def discover_app_roots(root: Path, vhosts: list[dict[str, Any]], max_roots: int 
                 # a web root itself: its children are sites
                 try:
                     for s in sorted(c.iterdir())[:300]:
-                        if s.is_dir() and _is_app_root(s):
+                        if _is_dir(s) and _is_app_root(s):
                             add(app_root_of(s), "webroot")
                 except OSError:
                     continue
@@ -740,9 +810,9 @@ def discover_app_roots(root: Path, vhosts: list[dict[str, Any]], max_roots: int 
                 continue
             try:
                 for c in sorted(d.iterdir())[:200]:
-                    if not c.is_dir() or c.name in VENDOR_DIRS or c.name.startswith(".") or c.name in DOCROOT_NAMES:
+                    if not _is_dir(c) or c.name in VENDOR_DIRS or c.name.startswith(".") or c.name in DOCROOT_NAMES:
                         continue
-                    if any((c / m).is_file() for m in NESTED_MARKERS):
+                    if any(_is_file(c / m) for m in NESTED_MARKERS):
                         add(c, "nested")
                     else:
                         stack.append((c, depth + 1))
@@ -891,13 +961,21 @@ def fingerprint_databases(case) -> list[dict[str, Any]]:
 
 # ---------------------------------------------------------------------------------------------- run / explain
 def fingerprint_host(root: Path) -> dict[str, Any]:
+    if _EVIDENCE_ROOT is None:
+        set_root(root)
     ctx = Ctx(root)
     panels = score(ctx, PANELS)
-    # aaPanel and BT Panel share one tree: keep the one whose own text marker matched (the higher score) when both score
+    # aaPanel and BT Panel share one tree: keep the one whose own text marker matched (the higher score) when both score;
+    # when both score the same (an upgraded panel carries both marker sets) both stay and the tie is said
     names = {p["name"]: p for p in panels}
-    if "aaPanel" in names and "BT Panel (宝塔)" in names and names["aaPanel"]["pct"] != names["BT Panel (宝塔)"]["pct"]:
-        loser = "BT Panel (宝塔)" if names["aaPanel"]["pct"] > names["BT Panel (宝塔)"]["pct"] else "aaPanel"
-        panels = [p for p in panels if p["name"] != loser]
+    if "aaPanel" in names and "BT Panel (宝塔)" in names:
+        if names["aaPanel"]["pct"] != names["BT Panel (宝塔)"]["pct"]:
+            loser = "BT Panel (宝塔)" if names["aaPanel"]["pct"] > names["BT Panel (宝塔)"]["pct"] else "aaPanel"
+            panels = [p for p in panels if p["name"] != loser]
+        else:
+            for p in panels:
+                if p["name"] in ("aaPanel", "BT Panel (宝塔)"):
+                    p["note"] = "tie with " + ("BT Panel (宝塔)" if p["name"] == "aaPanel" else "aaPanel") + ": both marker sets present (an upgraded or rebranded panel); decide from the panel's own text"
     services = score(ctx, SERVICES, min_pct=10)
     php_versions = sorted({p.split("/")[-3] for p in _glob(root, "www/server/php/*/bin/php", 20)} | {p.split("/")[-2] for p in _glob(root, "etc/php/*/fpm", 20)})
     return {"os": os_release(root), "hostname": (_read_small(root / "etc" / "hostname").strip().splitlines() or [""])[0], "panels": panels, "services": services,
@@ -907,6 +985,7 @@ def fingerprint_host(root: Path) -> dict[str, Any]:
 def fingerprint_tree(root: Path, log: Log = print, with_composition: bool = True, max_apps: int = 60) -> dict[str, Any]:
     """Host + applications for a mounted filesystem or an extracted tree (no case needed)."""
     root = Path(root)
+    set_root(root)
     t0 = time.time()
     host = fingerprint_host(root)
     vh = vhost_roots(root)

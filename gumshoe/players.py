@@ -44,7 +44,9 @@ STRONG = ("email", "phone", "wallet", "iban", "card", "sshkey")      # what merg
 # accounts sharing "123456" in groups of 2-50, under any promiscuity threshold - and a transaction id legitimately sits on
 # both the sender's and the receiver's rows. Both stay attached to players as linked identifiers, never as merge keys.
 LINK_ONLY = ("pwhash", "txid")
-PROMISCUOUS = {"email": 50, "phone": 20, "wallet": 50, "iban": 20, "card": 20, "sshkey": 50}   # rows an identifier may appear in and still be glue
+PROMISCUOUS = {"email": 50, "phone": 20, "wallet": 10, "iban": 20, "card": 20, "sshkey": 50}   # a wallet on >10 account rows is a payout/merchant address, not a person
+ACCOUNT_ROWS_PER_TABLE = 500_000     # account rows kept per table: the first half and the last half of the table (newest rows included)
+MONEY_ROWS_PER_TABLE = 2_000_000     # transaction rows kept per table, the same way   # rows an identifier may appear in and still be glue
 ACCOUNT_TABLE_RE = re.compile(r"(user|customer|client|member|account|profile|contact|person|people|employee|staff|admin|vendor|seller|buyer|"
                               r"merchant|subscriber|registr|login|auth|ftp|panel|wallet|kyc|partner|agent|affiliate|lead|order)", re.I)
 TX_TABLE_RE = re.compile(r"(trans|payment|pay|invoice|order|deposit|withdraw|transfer|txn|tx|ledger|balance|billing|charge|refund|"
@@ -99,7 +101,7 @@ class Acc:
     drops the rest (reported in the table record and the log)."""
 
     __slots__ = ("source", "where", "ent", "pairs", "activity", "money", "account_rows", "tables", "rows",
-                 "dropped_ent", "dropped_pairs", "dropped_activity", "_days")
+                 "dropped_ent", "dropped_pairs", "dropped_activity", "_days", "account_tail", "account_seen", "money_tail", "money_seen")
 
     def __init__(self, source: str, where: str = ""):
         self.source = source
@@ -115,6 +117,47 @@ class Acc:
         self.dropped_pairs = 0
         self.dropped_activity = 0
         self._days: dict[str, str] = {}                    # day strings interned (a few thousand distinct)
+        self.account_tail = None                           # past the cap: the first half stays, the last half rolls (deque)
+        self.account_seen = 0
+        self.money_tail = None
+        self.money_seen = 0
+
+    def add_account_row(self, r: dict[str, Any]) -> None:
+        self.account_seen += 1
+        if self.account_tail is not None:
+            self.account_tail.append(r)
+        elif len(self.account_rows) < ACCOUNT_ROWS_PER_TABLE // 2:
+            self.account_rows.append(r)
+        else:
+            from collections import deque
+            self.account_tail = deque(maxlen=ACCOUNT_ROWS_PER_TABLE // 2)
+            self.account_tail.append(r)
+
+    def add_money_row(self, m: dict[str, Any]) -> None:
+        self.money_seen += 1
+        if self.money_tail is not None:
+            self.money_tail.append(m)
+        elif len(self.money) < MONEY_ROWS_PER_TABLE // 2:
+            self.money.append(m)
+        else:
+            from collections import deque
+            self.money_tail = deque(maxlen=MONEY_ROWS_PER_TABLE // 2)
+            self.money_tail.append(m)
+
+    def finish_caps(self) -> None:
+        """Head + tail become the kept rows; what was dropped is recorded on the table."""
+        if self.account_tail is not None:
+            dropped = self.account_seen - len(self.account_rows) - len(self.account_tail)
+            self.account_rows.extend(self.account_tail)
+            self.account_tail = None
+            if self.tables:
+                self.tables[0].setdefault("capped", {})["account_rows"] = {"seen": self.account_seen, "kept_first": ACCOUNT_ROWS_PER_TABLE // 2, "kept_last": ACCOUNT_ROWS_PER_TABLE // 2, "dropped_middle": dropped}
+        if self.money_tail is not None:
+            dropped = self.money_seen - len(self.money) - len(self.money_tail)
+            self.money.extend(self.money_tail)
+            self.money_tail = None
+            if self.tables:
+                self.tables[0].setdefault("capped", {})["money_rows"] = {"seen": self.money_seen, "kept_first": MONEY_ROWS_PER_TABLE // 2, "kept_last": MONEY_ROWS_PER_TABLE // 2, "dropped_middle": dropped}
 
     def seen(self, t: str, v: str, n: str, role: str, ts: Optional[str], loc) -> Optional[tuple[str, str]]:
         k = (t, n)
@@ -247,7 +290,20 @@ def _scan_table_inner(acc: Acc, source: str, db: str, table: str, files: list, f
     ident_cols = [(i, t) for i, t in enumerate(ctypes) if t in ("email", "phone", "ip", "wallet", "txid", "pwhash", "username", "name", "domain", "iban", "card", "handle")]
     text_cols = [i for i, t in enumerate(ctypes) if t == "text"]
     fk_cols = {int(k): v for k, v in (fk_maps or {}).items()}
-    acc.tables.append({"source": source, "database": db, "table": table, "columns": header, "types": ctypes, "account_table": is_account, "tx_table": is_tx, "files": [Path(f).name for f in files]})
+    # a guessed foreign key (customer_id -> customers) is bound only when its values resolve: on the sample, at least half of the
+    # non-empty values must find a row of the target table, or the column is left unjoined and reported (a wrong binding would
+    # hand one person's logins, IPs and money to another)
+    fk_report = {}
+    for i, target in list(fk_cols.items()):
+        vals = [r[i] for r in samples if i < len(r) and r[i].strip()]
+        hits = sum(1 for v in vals[:500] if fk_lookup(target, v))
+        rate = hits / len(vals[:500]) if vals else None
+        bound = rate is None or len(vals) < 20 or rate >= 0.5
+        fk_report[header[i]] = {"target": target, "sample": len(vals[:500]), "hit_rate": None if rate is None else round(rate, 2), "bound": bound}
+        if not bound:
+            del fk_cols[i]
+    acc.tables.append({"source": source, "database": db, "table": table, "columns": header, "types": ctypes, "account_table": is_account, "tx_table": is_tx, "files": [Path(f).name for f in files],
+                       **({"fk": fk_report} if fk_report else {})})
     rowno = 0
     for fn in files:
         with open(fn, "r", encoding="utf-8-sig", newline="") as f:
@@ -264,6 +320,7 @@ def _scan_table_inner(acc: Acc, source: str, db: str, table: str, files: list, f
                         if ts:
                             break
                 keys: list = []
+                own: list = []           # identifiers in this row's own typed columns: the only ones that may merge account rows
                 loc = rowno
                 row_idents: dict[str, str] = {}
                 for i, t in ident_cols:
@@ -274,6 +331,7 @@ def _scan_table_inner(acc: Acc, source: str, db: str, table: str, files: list, f
                         k = acc.seen(r[0], r[1], r[2], header[i], ts, loc)
                         if k:
                             keys.append(k)
+                            own.append(k)
                             row_idents.setdefault(r[0], r[1])
                 if rowno <= MAX_ROWS_TEXTSCAN:
                     for i in text_cols:
@@ -283,7 +341,8 @@ def _scan_table_inner(acc: Acc, source: str, db: str, table: str, files: list, f
                                 if k:
                                     keys.append(k)
                                     row_idents.setdefault(t, v)
-                # foreign keys: the referenced account's strong identifiers join this row
+                # foreign keys (validated above): the referenced account's strong identifiers join this row - an ownership join
+                # (accounts.user_id -> users), so they may merge as well
                 for i, target in fk_cols.items():
                     if i < len(row) and row[i]:
                         ref = fk_lookup(target, row[i])
@@ -291,13 +350,17 @@ def _scan_table_inner(acc: Acc, source: str, db: str, table: str, files: list, f
                             k = acc.seen(t, v, n, f"{header[i]}->{target}", ts, loc)
                             if k:
                                 keys.append(k)
+                                own.append(k)
                                 row_idents.setdefault(t, v)
                 if keys:
                     acc.link(keys, ts, where)
-                if is_account and len(keys) >= 1 and len(acc.account_rows) < 500_000:
-                    acc.account_rows.append({"source": source, "db": db, "table": table, "row": rowno, "ts": ts, "idents": [list(k) for k in sorted(set(keys))],
-                                             "label": row_idents.get("name") or row_idents.get("email") or row_idents.get("username") or row_idents.get("phone") or ""})
-                if is_tx and amount_cols and len(acc.money) < 2_000_000:
+                if is_account and len(keys) >= 1:
+                    # identifiers found in free text stay on the row as links (idents) but never as merge keys (own): a "referred by
+                    # bob@x" note must not fuse two people
+                    acc.add_account_row({"source": source, "db": db, "table": table, "row": rowno, "ts": ts, "idents": [list(k) for k in sorted(set(keys))],
+                                         "own": [list(k) for k in sorted(set(own))],
+                                         "label": row_idents.get("name") or row_idents.get("email") or row_idents.get("username") or row_idents.get("phone") or ""})
+                if is_tx and amount_cols:
                     amt = None
                     for i in amount_cols:
                         if i < len(row) and row[i]:
@@ -312,11 +375,12 @@ def _scan_table_inner(acc: Acc, source: str, db: str, table: str, files: list, f
                             if i < len(row) and row[i]:
                                 cur = row[i].strip().upper()[:12]
                                 break
-                        acc.money.append({"source": source, "db": db, "table": table, "row": rowno, "ts": ts, "amount": amt, "currency": cur,
-                                          "idents": [list(k) for k in sorted(set(keys))][:12]})
+                        acc.add_money_row({"source": source, "db": db, "table": table, "row": rowno, "ts": ts, "amount": amt, "currency": cur,
+                                           "idents": [list(k) for k in sorted(set(keys))][:12]})
     acc.rows = rowno
+    acc.finish_caps()
     if acc.dropped_ent or acc.dropped_pairs or acc.dropped_activity:
-        acc.tables[0]["capped"] = {"identifiers_dropped": acc.dropped_ent, "pairs_dropped": acc.dropped_pairs, "activity_dropped": acc.dropped_activity}
+        acc.tables[0].setdefault("capped", {}).update({"identifiers_dropped": acc.dropped_ent, "pairs_dropped": acc.dropped_pairs, "activity_dropped": acc.dropped_activity})
     return _pack(acc, packdir)
 
 
@@ -446,7 +510,7 @@ def _pack(acc: Acc, packdir) -> str:
         dump(chunk); chunk = []
         acc.money = []
         for r in acc.account_rows:
-            chunk.append((r["source"], r["db"], r["table"], r["row"], r["ts"], r["label"], json.dumps(r["idents"], ensure_ascii=False)))
+            chunk.append((r["source"], r["db"], r["table"], r["row"], r["ts"], r["label"], json.dumps(r["idents"], ensure_ascii=False), json.dumps(r.get("own", r["idents"]), ensure_ascii=False)))
             if len(chunk) >= PACK_CHUNK:
                 dump(chunk); chunk = []
         dump(chunk)
@@ -553,7 +617,7 @@ def scan_logs_and_inventory(case, log: Log, packdir) -> str:
                     keys.append(acc.seen(r[0], r[1], r[2], f"panel user.{col}", ts, loc))
         acc.link(keys, ts, "panel users")
         if keys:
-            acc.account_rows.append({"source": "system", "db": "panel", "table": "users", "row": u.get("id"), "ts": ts, "idents": [list(k) for k in keys], "label": u.get("username") or ""})
+            acc.account_rows.append({"source": "system", "db": "panel", "table": "users", "row": u.get("id"), "ts": ts, "idents": [list(k) for k in keys], "own": [list(k) for k in keys], "label": u.get("username") or ""})
     for e in aa.get("operation_log_sample") or []:
         ts = _ts_norm(str(e.get("addtime") or ""))
         for t, v, nn in idf.scan_text(str(e.get("log") or ""), "panel log"):
@@ -651,8 +715,9 @@ CREATE TABLE IF NOT EXISTS activity(entity_id INTEGER, day TEXT, source TEXT, co
 CREATE TABLE IF NOT EXISTS players(id INTEGER PRIMARY KEY, label TEXT, kind TEXT, score REAL, first_seen TEXT, last_seen TEXT, n_entities INTEGER,
     n_links INTEGER, sources TEXT, summary TEXT);
 CREATE TABLE IF NOT EXISTS player_entities(player_id INTEGER, entity_id INTEGER, role TEXT, PRIMARY KEY(player_id, entity_id));
-CREATE TABLE IF NOT EXISTS account_rows(player_id INTEGER, source TEXT, db TEXT, table_ TEXT, row INTEGER, ts TEXT, label TEXT, idents TEXT);
-CREATE TABLE IF NOT EXISTS money(id INTEGER PRIMARY KEY, source TEXT, db TEXT, table_ TEXT, row INTEGER, ts TEXT, amount REAL, currency TEXT, idents TEXT, player_id INTEGER);
+CREATE TABLE IF NOT EXISTS account_rows(player_id INTEGER, source TEXT, db TEXT, table_ TEXT, row INTEGER, ts TEXT, label TEXT, idents TEXT, own TEXT);
+CREATE TABLE IF NOT EXISTS money(id INTEGER PRIMARY KEY, source TEXT, db TEXT, table_ TEXT, row INTEGER, ts TEXT, amount REAL, currency TEXT, idents TEXT, player_id INTEGER,
+    attribution TEXT, candidates TEXT);
 CREATE TABLE IF NOT EXISTS tables_(source TEXT, db TEXT, table_ TEXT, columns TEXT, types TEXT, account_table INTEGER, tx_table INTEGER, rows INTEGER, files TEXT);
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS glue(player_id INTEGER, type TEXT, norm TEXT, rows TEXT);
@@ -678,6 +743,9 @@ def _connect(path: Path) -> sqlite3.Connection:
     con = sqlite3.connect(path)
     con.executescript("PRAGMA journal_mode=WAL; PRAGMA synchronous=OFF; PRAGMA temp_store=FILE; PRAGMA cache_size=-200000;")
     con.executescript(SCHEMA)
+    for table, col, typ in (("account_rows", "own", "TEXT"), ("money", "attribution", "TEXT"), ("money", "candidates", "TEXT")):
+        if col not in [r[1] for r in con.execute(f"PRAGMA table_info({table})")]:       # a players.db from an earlier build
+            con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
     return con
 
 
@@ -720,7 +788,7 @@ class Store:
             con.execute("INSERT INTO activity(entity_id, day, source, count) SELECT e.id, a.day, ?, a.count FROM inc_a a JOIN entities e ON e.type=a.type AND e.norm=a.norm WHERE true "
                         "ON CONFLICT(entity_id, day, source) DO UPDATE SET count=count+excluded.count", (src,))
             con.executemany("INSERT INTO money(source, db, table_, row, ts, amount, currency, idents) VALUES (?,?,?,?,?,?,?,?)", pk.section())
-            con.executemany("INSERT INTO account_rows(player_id, source, db, table_, row, ts, label, idents) VALUES (NULL,?,?,?,?,?,?,?)", pk.section())
+            con.executemany("INSERT INTO account_rows(player_id, source, db, table_, row, ts, label, idents, own) VALUES (NULL,?,?,?,?,?,?,?,?)", pk.section())
             con.executemany("INSERT INTO tables_(source, db, table_, columns, types, account_table, tx_table, rows, files) VALUES (?,?,?,?,?,?,?,?,?)",
                             ((t["source"], t["database"], t["table"], json.dumps(t["columns"], ensure_ascii=False), json.dumps(t["types"]), int(t["account_table"]), int(t["tx_table"]),
                               head["rows"], json.dumps(t["files"])) for t in head["tables"]))
@@ -775,17 +843,22 @@ def derive_players(con: sqlite3.Connection, log: Log, shared_ip_threshold: int =
     e-mail like noreply@..., a default password hash) is demoted: it links nothing."""
     con.execute("DELETE FROM players"); con.execute("DELETE FROM player_entities"); con.execute("UPDATE entities SET player_id=NULL")
     con.execute("UPDATE account_rows SET player_id=NULL"); con.execute("UPDATE money SET player_id=NULL")
-    rows = con.execute("SELECT rowid, idents, label, ts, db, table_, row FROM account_rows LIMIT ?", (MAX_ACCOUNT_ROWS,)).fetchall()
+    rows = con.execute("SELECT rowid, idents, label, ts, db, table_, row, own FROM account_rows LIMIT ?", (MAX_ACCOUNT_ROWS,)).fetchall()
     n_rows = len(rows)
     if n_rows >= MAX_ACCOUNT_ROWS:
         log(f"[players] account rows capped at {MAX_ACCOUNT_ROWS} (memory bound)")
-    # how many account rows each strong identifier appears in: promiscuous ones are not glue
+    # how many account rows each strong identifier appears in: promiscuous ones are not glue. Only a row's own typed
+    # columns (own) can merge; identifiers joined through foreign keys or found in free text are links of the player
     occ: Counter = Counter()
     row_keys: list[list[tuple[str, str]]] = []
-    for rid, idents, *_ in rows:
-        ks = [tuple(k) for k in json.loads(idents)]
+    row_extra: list[list[tuple[str, str]]] = []
+    for rid, idents, _label, _ts, _db, _table, _rowno, own in rows:
+        all_ks = [tuple(k) for k in json.loads(idents)]
+        ks = [tuple(k) for k in json.loads(own)] if own else all_ks
         row_keys.append(ks)
-        for k in set(ks):
+        kset = set(ks)
+        row_extra.append([k for k in all_ks if k not in kset])
+        for k in kset:
             if k[0] in STRONG:
                 occ[k] += 1
     promiscuous = {k for k, c in occ.items() if c > PROMISCUOUS.get(k[0], 50)}
@@ -811,6 +884,7 @@ def derive_players(con: sqlite3.Connection, log: Log, shared_ip_threshold: int =
     con.execute("CREATE TEMP TABLE IF NOT EXISTS need(type TEXT, norm TEXT, PRIMARY KEY(type, norm)) WITHOUT ROWID")
     con.execute("DELETE FROM need")
     con.executemany("INSERT OR IGNORE INTO need VALUES (?,?)", (k for ks in row_keys for k in ks))
+    con.executemany("INSERT OR IGNORE INTO need VALUES (?,?)", (k for ks in row_extra for k in ks))
     ent_ids = {(t, n): i for i, t, n in con.execute("SELECT e.id, e.type, e.norm FROM need nd JOIN entities e ON e.type=nd.type AND e.norm=nd.norm")}
     con.execute("DELETE FROM need")
     pid = 0
@@ -818,13 +892,16 @@ def derive_players(con: sqlite3.Connection, log: Log, shared_ip_threshold: int =
     for root, members in groups.items():
         pid += 1
         keys: Counter = Counter()
+        extra: Counter = Counter()        # joined / free-text identifiers of the rows: linked, never strong
         labels: Counter = Counter()
         sources: Counter = Counter()
         first = last = None
         for i in members:
-            rid, idents, label, ts, db, table, _rowno = rows[i]
+            rid, idents, label, ts, db, table, _rowno, _own = rows[i]
             for k in row_keys[i]:
                 keys[k] += 1
+            for k in row_extra[i]:
+                extra[k] += 1
             if label:
                 labels[label] += 1
             sources[f"{db}.{table}"] += 1
@@ -844,6 +921,12 @@ def derive_players(con: sqlite3.Connection, log: Log, shared_ip_threshold: int =
             pe_rows.append((pid, eid, role))
             if role == "strong":
                 strong_updates.append((pid, eid))
+        for k in extra:
+            if k in keys:
+                continue
+            eid = ent_ids.get(k)
+            if eid is not None:
+                pe_rows.append((pid, eid, "linked"))
         if len(players_rows) >= 20_000:
             con.executemany("INSERT INTO players(id, label, kind, score, first_seen, last_seen, n_entities, n_links, sources, summary) VALUES (?,?,?,?,?,?,?,?,?,?)", players_rows)
             con.executemany("INSERT OR IGNORE INTO player_entities(player_id, entity_id, role) VALUES (?,?,?)", pe_rows)
@@ -857,7 +940,7 @@ def derive_players(con: sqlite3.Connection, log: Log, shared_ip_threshold: int =
                     ((row_pid.get(rows[idxs[0]][0]), k[0], k[1], json.dumps([f"{rows[i][4]}.{rows[i][5]}:{rows[i][6]}" for i in idxs[:50]]))
                      for k, idxs in glue.items()))
     con.executemany("UPDATE entities SET player_id=? WHERE id=? AND player_id IS NULL", strong_updates)
-    del rows, row_keys, groups, ent_ids, players_rows, pe_rows, row_updates, strong_updates
+    del rows, row_keys, row_extra, groups, ent_ids, players_rows, pe_rows, row_updates, strong_updates
     con.commit()
     # linked identifiers (IPs, wallets, domains...) reached through row/line co-occurrence with the player's strong identifiers
     ent_player = {i: p for i, p in con.execute("SELECT entity_id, player_id FROM player_entities WHERE role='strong'")}
@@ -901,18 +984,44 @@ def derive_players(con: sqlite3.Connection, log: Log, shared_ip_threshold: int =
                                "WHERE pe.role IN ('strong','linked') AND e.type IN ('wallet','txid','iban','card')"):
         any_player.setdefault((t, n), p)
     money_updates = []
+    n_one = n_lnk = n_amb = n_none = 0
     for mid, idents in con.execute("SELECT id, idents FROM money"):
         cands: Counter = Counter()
+        via_strong = set()
         for k in json.loads(idents):
             k = tuple(k)
             p = key_player.get(k)
-            if p is None and k[0] in ("wallet", "txid", "iban", "card"):
+            if p is not None:
+                via_strong.add(p)
+            elif k[0] in ("wallet", "txid", "iban", "card"):
                 p = any_player.get(k)
             if p is not None:
                 cands[p] += 1
-        if cands:
-            money_updates.append((cands.most_common(1)[0][0], mid))
-    con.executemany("UPDATE money SET player_id=? WHERE id=?", money_updates)
+        # a row naming exactly one player is that player's; a row naming two (sender and receiver, merchant and customer) is
+        # nobody's - counted and listed as ambiguous, never credited to the side with more identifiers on the row. A row reached
+        # only through a wallet *linked* to the player by co-occurrence (not on an account row) is marked so: that wallet may be
+        # a counterparty's
+        if len(cands) == 1:
+            p = next(iter(cands))
+            if p in via_strong:
+                n_one += 1
+                money_updates.append((p, "one", None, mid))
+            else:
+                n_lnk += 1
+                money_updates.append((p, "linked", None, mid))
+        elif cands:
+            n_amb += 1
+            money_updates.append((None, "ambiguous", json.dumps(sorted(cands)), mid))
+        else:
+            n_none += 1
+            money_updates.append((None, "none", None, mid))
+        if len(money_updates) >= 50_000:
+            con.executemany("UPDATE money SET player_id=?, attribution=?, candidates=? WHERE id=?", money_updates)
+            money_updates = []
+    con.executemany("UPDATE money SET player_id=?, attribution=?, candidates=? WHERE id=?", money_updates)
+    log(f"[players] money rows: {n_one} attributed to one player by its own identifiers, {n_lnk} through a wallet/txid linked to one player by co-occurrence only (marked), "
+        f"{n_amb} name two or more players (not attributed, listed), {n_none} name none")
+    con.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('money_attribution', ?)", (json.dumps({"one": n_one, "linked": n_lnk, "ambiguous": n_amb, "none": n_none}),))
     del key_player, any_player, money_updates
     # scores: activity + reach, set-based
     n_links = dict(con.execute("SELECT player_id, COUNT(*) FROM player_entities WHERE role IN ('linked','shared') GROUP BY player_id"))
@@ -933,8 +1042,14 @@ def _cap_note(head: dict[str, Any]) -> str:
     c = head["tables"][0].get("capped") if head.get("tables") else None
     if not c:
         return ""
-    return (f" (capped: {c['identifiers_dropped']} more identifiers, {c['pairs_dropped']} more pairs and {c.get('activity_dropped', 0)} more day cells "
-            f"not kept - the table is bigger than the per-table memory bound)")
+    parts = []
+    if "identifiers_dropped" in c:
+        parts.append(f"{c['identifiers_dropped']} more identifiers, {c['pairs_dropped']} more pairs and {c.get('activity_dropped', 0)} more day cells not kept - the table is bigger than the per-table memory bound")
+    for key, what in (("account_rows", "account rows"), ("money_rows", "transaction rows")):
+        if key in c:
+            a = c[key]
+            parts.append(f"{what}: kept the first {a['kept_first']} and the last {a['kept_last']} of {a['seen']}, {a['dropped_middle']} in the middle not kept")
+    return " (capped: " + "; ".join(parts) + ")" if parts else ""
 
 
 def _mem_available_gb() -> float:
@@ -1025,6 +1140,9 @@ def build(case, log: Log = print, workers: Optional[int] = None) -> dict[str, An
             log(f"[players] [{done}/{len(args)}] {t['database']}.{t['table']}: NOT READ - {t['error']}")
             return
         log(f"[players] [{done}/{len(args)}] {t['database']}.{t['table']}: {head['rows']} rows, {head['n'][0]} identifiers" + _cap_note(head))
+        for col, fk in (t.get("fk") or {}).items():
+            if not fk.get("bound"):
+                log(f"[players]   {t['database']}.{t['table']}.{col} looked like a key into {fk['target']} but only {int((fk['hit_rate'] or 0) * 100)}% of {fk['sample']} sampled values resolve: not joined")
 
     if args:
         if n_workers > 1 and len(args) > 1:
@@ -1072,6 +1190,19 @@ def open_db(case) -> Optional[sqlite3.Connection]:
         return None
     con = sqlite3.connect(p)
     con.row_factory = sqlite3.Row
+    try:
+        # a players.db built by an earlier release lacks the newer columns: add them (empty) so the tab opens; a Rebuild fills them
+        cols = {r[1] for r in con.execute("PRAGMA table_info(money)")}
+        if "attribution" not in cols:
+            con.execute("ALTER TABLE money ADD COLUMN attribution TEXT")
+            con.execute("ALTER TABLE money ADD COLUMN candidates TEXT")
+            con.execute("UPDATE money SET attribution='one' WHERE player_id IS NOT NULL")
+            con.commit()
+        if "own" not in {r[1] for r in con.execute("PRAGMA table_info(account_rows)")}:
+            con.execute("ALTER TABLE account_rows ADD COLUMN own TEXT")
+            con.commit()
+    except sqlite3.Error:
+        pass
     return con
 
 
@@ -1126,9 +1257,14 @@ def player_detail(con: sqlite3.Connection, pid: int) -> dict[str, Any]:
     rows = [dict(r) for r in con.execute("SELECT source, db, table_, row, ts, label FROM account_rows WHERE player_id=? ORDER BY ts", (pid,))]
     money = [dict(r) for r in con.execute("SELECT source, db, table_, row, ts, amount, currency, idents FROM money WHERE player_id=? ORDER BY ts", (pid,))]
     msum = [dict(r) for r in con.execute("SELECT currency, COUNT(*) AS n, SUM(amount) AS total, SUM(CASE WHEN amount>0 THEN amount ELSE 0 END) AS inflow, "
-                                           "SUM(CASE WHEN amount<0 THEN amount ELSE 0 END) AS outflow, MIN(ts) AS first, MAX(ts) AS last FROM money WHERE player_id=? GROUP BY currency", (pid,))]
+                                           "SUM(CASE WHEN amount<0 THEN amount ELSE 0 END) AS outflow, MIN(ts) AS first, MAX(ts) AS last, "
+                                           "SUM(CASE WHEN attribution='linked' THEN 1 ELSE 0 END) AS via_linked_wallet FROM money WHERE player_id=? GROUP BY currency", (pid,))]
     glue = [dict(r) for r in con.execute("SELECT type, norm, rows FROM glue WHERE player_id=?", (pid,))]
-    return {"player": dict(p), "entities": ents, "activity": act, "account_rows": rows, "money": money, "money_summary": msum, "glue": glue}
+    # transaction rows that name this player together with another one: not counted above, listed so they can be judged
+    amb = [dict(r) for r in con.execute("SELECT source, db, table_, row, ts, amount, currency, idents, candidates FROM money "
+                                        "WHERE attribution='ambiguous' AND candidates LIKE ? ORDER BY ts LIMIT 500", (f"%{pid}%",))]
+    amb = [a for a in amb if pid in json.loads(a["candidates"] or "[]")]
+    return {"player": dict(p), "entities": ents, "activity": act, "account_rows": rows, "money": money, "money_summary": msum, "glue": glue, "money_ambiguous": amb}
 
 
 def entity_lookup(con: sqlite3.Connection, text: str, limit: int = 50) -> list[dict[str, Any]]:
@@ -1207,10 +1343,16 @@ def dossier_text(con: sqlite3.Connection, pid: int) -> str:
         for g in d["glue"]:
             lines.append(f"- {g['type']} {g['norm']} joins rows " + ", ".join(json.loads(g["rows"] or "[]")[:8]))
         lines.append("")
-    if d["money_summary"]:
+    if d["money_summary"] or d.get("money_ambiguous"):
         lines.append("## Money")
         for m in d["money_summary"]:
-            lines.append(f"- {m['currency'] or '?'}: {m['n']} rows, net {m['total']:.2f}, in {m['inflow']:.2f}, out {m['outflow']:.2f}, {m['first'] or '?'} .. {m['last'] or '?'}")
+            lines.append(f"- {m['currency'] or '?'}: {m['n']} rows, net {m['total']:.2f}, in {m['inflow']:.2f}, out {m['outflow']:.2f}, {m['first'] or '?'} .. {m['last'] or '?'}"
+                         + (f" ({m['via_linked_wallet']} of the rows reached only through a wallet linked to this player by co-occurrence - possibly a counterparty's; see transactions.csv)" if m.get("via_linked_wallet") else ""))
+        if d.get("money_ambiguous"):
+            lines.append(f"- {len(d['money_ambiguous'])} transaction row(s) name this player together with another player (sender and receiver, say): "
+                         "not counted above, listed in unattributed_money.csv; the first:")
+            for a in d["money_ambiguous"][:5]:
+                lines.append(f"  - {a['db']}.{a['table_']} row {a['row']} ({a['ts'] or 'undated'}): {a['amount']} {a['currency']} between players {json.loads(a['candidates'] or '[]')}")
         lines.append("")
     if d["account_rows"]:
         lines.append("## Account rows")
@@ -1267,10 +1409,22 @@ def write_outputs(case, log: Log = print) -> dict[str, Any]:
                         "; ".join(f"{s[0]} x{s[1]}" for s in srcs[:10])])
     with open(out / "transactions.csv", "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f, lineterminator="\r\n")
-        w.writerow(["ts", "amount", "currency", "player", "player_label", "identifiers", "source", "database", "table", "row"])
-        for m in con.execute("SELECT m.ts, m.amount, m.currency, m.player_id, p.label, m.idents, m.source, m.db, m.table_, m.row FROM money m LEFT JOIN players p ON p.id=m.player_id ORDER BY m.ts"):
+        w.writerow(["ts", "amount", "currency", "player", "player_label", "attribution", "identifiers", "source", "database", "table", "row"])
+        for m in con.execute("SELECT m.ts, m.amount, m.currency, m.player_id, p.label, m.attribution, m.candidates, m.idents, m.source, m.db, m.table_, m.row FROM money m LEFT JOIN players p ON p.id=m.player_id ORDER BY m.ts"):
             idents = "; ".join(f"{t}={v}" for t, v in json.loads(m["idents"] or "[]"))
-            w.writerow([m["ts"], m["amount"], m["currency"], m["player_id"], m["label"], idents, m["source"], m["db"], m["table_"], m["row"]])
+            attr = m["attribution"] or ""
+            if attr == "ambiguous":
+                attr = "ambiguous: players " + ", ".join(str(c) for c in json.loads(m["candidates"] or "[]"))
+            w.writerow([m["ts"], m["amount"], m["currency"], m["player_id"], m["label"], attr, idents, m["source"], m["db"], m["table_"], m["row"]])
+    with open(out / "unattributed_money.csv", "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f, lineterminator="\r\n")
+        w.writerow(["why", "ts", "amount", "currency", "candidate_players", "identifiers", "source", "database", "table", "row"])
+        for m in con.execute("SELECT attribution, ts, amount, currency, candidates, idents, source, db, table_, row FROM money WHERE attribution='ambiguous' ORDER BY ts"):
+            idents = "; ".join(f"{t}={v}" for t, v in json.loads(m["idents"] or "[]"))
+            w.writerow(["names two or more players", m["ts"], m["amount"], m["currency"], "; ".join(str(c) for c in json.loads(m["candidates"] or "[]")), idents, m["source"], m["db"], m["table_"], m["row"]])
+        n_none = con.execute("SELECT COUNT(*) FROM money WHERE attribution='none'").fetchone()[0]
+        if n_none:
+            w.writerow([f"{n_none} further transaction rows name no known player (see transactions.csv, player empty)"])
     with open(out / "activity.csv", "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f, lineterminator="\r\n")
         w.writerow(["day", "events", "distinct_identifiers"])
@@ -1290,7 +1444,10 @@ def write_outputs(case, log: Log = print) -> dict[str, Any]:
             shutil.copy2(out / fn, idx / fn)
         except OSError:
             pass
-    (idx / "export.json").write_text(json.dumps({"out": str(out), "written": utc_now(), "players": n_players}, indent=2), "utf-8")
+    seq, head = case.custody.head()
+    (idx / "export.json").write_text(json.dumps({"out": str(out), "written": utc_now(), "players": n_players, "custody_head": {"records": seq, "hash": head}}, indent=2), "utf-8")
+    (out / "MANIFEST.txt").write_text(f"Players export of case {case.meta.get('case_id')} written {utc_now()}\ncustody chain head at export: record {seq}, hash {head}\n"
+                                      f"players: {n_players}\nfiles: players.csv, entities.csv, links.csv, wallets.csv, transactions.csv, unattributed_money.csv, activity.csv, dossiers/\n", "utf-8")
     log(f"[players] CSV folders -> {out}")
     return {"out": str(out), "players": n_players}
 

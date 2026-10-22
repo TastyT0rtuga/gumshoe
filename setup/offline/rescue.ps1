@@ -12,11 +12,13 @@
     4. if the disk still does not start: the cases and settings are copied OUT of it (read-only mount, no
        journal replay) to <drive>:\DFIR-rescue\<date>\, and the exact reinstall steps are printed - they are
        not run. Add -Everything to copy the extracted images/trees (work folders) as well.
+       The check runs read-only first (e2fsck -n); before any repair the disk file is copied to the drive with
+       the most room (it holds the only copy of the cases) - -NoBackup repairs without that copy.
 
   Run from Gumshoe-Rescue.bat (it asks for administrator rights: attaching a virtual disk needs them).
   Everything printed is also written to C:\DFIR\rescue.log.
 #>
-param([string]$Bundle = "", [string]$WslName = "DFIR", [string]$Disk = "", [string]$RescueDir = "", [switch]$Force, [switch]$Keep, [switch]$Everything)
+param([string]$Bundle = "", [string]$WslName = "DFIR", [string]$Disk = "", [string]$RescueDir = "", [switch]$Force, [switch]$Keep, [switch]$Everything, [switch]$NoBackup)
 . (Join-Path $PSScriptRoot "common.ps1")
 if (-not $Bundle) { $Bundle = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..")).Path }
 # attaching a virtual disk (wsl --mount) needs administrator rights: re-launch elevated, same user, same distros
@@ -26,13 +28,14 @@ if (-not $isAdmin) {
   $al = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$PSCommandPath`"", "-Bundle", "`"$Bundle`"", "-WslName", $WslName)
   if ($Disk) { $al += @("-Disk", "`"$Disk`"") }
   if ($RescueDir) { $al += @("-RescueDir", "`"$RescueDir`"") }
-  if ($Force) { $al += "-Force" }; if ($Keep) { $al += "-Keep" }; if ($Everything) { $al += "-Everything" }
+  if ($Force) { $al += "-Force" }; if ($Keep) { $al += "-Keep" }; if ($Everything) { $al += "-Everything" }; if ($NoBackup) { $al += "-NoBackup" }
   Write-Host "Windows will ask for administrator approval (attaching the distro's disk for the check needs it)."
   try { $p = Start-Process -FilePath "powershell.exe" -Verb RunAs -Wait -PassThru -ArgumentList $al; exit $p.ExitCode }
   catch { Write-Host "administrator approval was declined; the disk check cannot run without it." -ForegroundColor Red; exit 1 }
 }
 $Dest = "C:\DFIR"
 $Rescue = "$WslName-rescue"
+$Stamp = Get-Date -Format "yyyyMMdd-HHmm"
 New-Item -ItemType Directory -Force -Path $Dest | Out-Null
 try { Start-Transcript -Path (Join-Path $Dest "rescue.log") -Append | Out-Null } catch { }
 
@@ -162,9 +165,36 @@ if ($new.Count -ne 1) {
   [void](Invoke-Wsl @("--unmount", $vhd)); Finish 2
 }
 $dev = "/dev/" + $new[0]
-Write-Host "  attached as $dev inside $Rescue; running e2fsck -f -y (repairs what it finds; minutes on a large disk)..."
-$f = Invoke-Wsl @("-d", $Rescue, "-u", "root", "--", "e2fsck", "-f", "-y", $dev)
-($f[1] -split "`n") | Select-Object -Last 25 | ForEach-Object { Write-Host "    $_" }
+# first a read-only pass: what is wrong, without touching the only copy of the cases
+Write-Host "  attached as $dev inside $Rescue; running e2fsck -f -n first (read-only: reports, repairs nothing)..."
+$f0 = Invoke-Wsl @("-d", $Rescue, "-u", "root", "--", "e2fsck", "-f", "-n", $dev)
+($f0[1] -split "`n") | Select-Object -Last 12 | ForEach-Object { Write-Host "    $_" }
+if ($f0[0] -eq 0) {
+  Write-Ok "the filesystem is clean: no repair needed (so the disk is not the problem: see the drive space above, or WSL itself)"
+  $f = $f0
+} else {
+  # errors: a copy of the disk file goes to the drive with the most room before anything is repaired, unless -NoBackup
+  $vsize = (Get-Item $vhd).Length
+  if (-not $NoBackup) {
+    $bdrive = Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Free -gt ($vsize * 1.05) -and $_.Root -match '^[A-Z]:\\$' } | Sort-Object Free -Descending | Select-Object -First 1
+    if ($RescueDir) { $bdir = Join-Path $RescueDir "disk-before-repair" } elseif ($bdrive) { $bdir = Join-Path $bdrive.Root "DFIR-rescue\$Stamp\disk-before-repair" } else { $bdir = $null }
+    if ($bdir) {
+      New-Item -ItemType Directory -Force -Path $bdir | Out-Null
+      Write-Host ("  copying the disk file ({0:N1} GB) to {1} before repairing it (the cases are only on that disk)..." -f ($vsize / 1GB), $bdir)
+      [void](Invoke-Wsl @("--unmount", $vhd)); Start-Sleep 1
+      Copy-Item -Path $vhd -Destination (Join-Path $bdir (Split-Path $vhd -Leaf)) -Force
+      Write-Ok "copy made: $bdir"
+      $m = Invoke-Wsl @("--mount", $vhd, "--vhd", "--bare"); Start-Sleep 2
+      if ($m[0] -ne 0) { Write-Host "  could not re-attach the disk after the copy: $($m[1])" -ForegroundColor Red; Finish 2 }
+    } else {
+      Write-Host ("  no drive has room for a copy of the disk file ({0:N1} GB) and the cases exist only on it. Free the space (or give -RescueDir on a drive with room), or run again with -NoBackup to repair without a copy." -f ($vsize / 1GB)) -ForegroundColor Red
+      [void](Invoke-Wsl @("--unmount", $vhd)); Finish 2
+    }
+  } else { Write-Warn2 "-NoBackup given: repairing the only copy of the disk without a backup" }
+  Write-Host "  running e2fsck -f -y (repairs what it finds; minutes on a large disk)..."
+  $f = Invoke-Wsl @("-d", $Rescue, "-u", "root", "--", "e2fsck", "-f", "-y", $dev)
+  ($f[1] -split "`n") | Select-Object -Last 25 | ForEach-Object { Write-Host "    $_" }
+}
 switch ($f[0]) {
   0 { Write-Ok "the filesystem was clean (so the disk is not the problem: see the drive space above, or WSL itself)" }
   1 { Write-Ok "errors were found and repaired" }
@@ -190,7 +220,7 @@ if ($m[0] -ne 0) {
   Write-Host "  the disk cannot be mounted even read-only: $($m[1])" -ForegroundColor Red
   Write-Host "  Last resort: copy $vhd to another drive now (so a specialist can try), then reinstall as printed below." -ForegroundColor Yellow
 } else {
-  $stamp = Get-Date -Format "yyyyMMdd-HHmm"
+  $stamp = $Stamp
   $outWin = Get-SpaceDir $stamp
   if (-not $outWin) { Write-Host "no drive has 2 GB free to copy the cases to; free some space first (or give -RescueDir <folder>)." -ForegroundColor Red; [void](Invoke-Wsl @("--unmount", $vhd)); Finish 2 }
   New-Item -ItemType Directory -Force -Path $outWin | Out-Null

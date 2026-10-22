@@ -456,6 +456,8 @@ def cmd_custody(args):
     c = _case(args)
     ok, n, bad, msg = c.custody.verify()
     print(("OK   " if ok else "FAIL ") + msg + (f" (first bad seq {bad})" if bad else ""))
+    seq, head = c.custody.head()
+    print(f"head: record {seq}, hash {head}  (write this into your notes; every export manifest and report carries it)")
     if args.show:
         for r in c.custody.tail(args.show):
             print(f"{r.seq:5d} {r.ts} {r.action:20s} {json.dumps(r.details, default=str)[:160]}")

@@ -126,13 +126,47 @@ class CustodyLog:
 
     GENESIS = "0" * 64
 
-    def __init__(self, path: Path, actor: str = "gumshoe"):
+    def __init__(self, path: Path, actor: str = "gumshoe", anchor: Optional[Path] = None):
         self.path = Path(path)
         self.actor = actor
         self.host = socket.gethostname()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if not self.path.exists():
             self.path.touch()
+        # the anchor: the head of the chain (seq + hash) appended to a second file outside the case folder after every
+        # record, so a chain that was truncated or rewritten in place no longer verifies; it is written best-effort
+        self.anchor = Path(anchor) if anchor else None
+
+    def head(self) -> tuple[int, str]:
+        """(records, hash of the last record) - the chain head to write into manifests and reports."""
+        last = self._last()
+        return (last.seq, last.hash) if last else (0, self.GENESIS)
+
+    def _anchor_write(self, rec: "CustodyRecord") -> None:
+        if not self.anchor:
+            return
+        try:
+            self.anchor.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.anchor, "a", encoding="utf-8") as f:
+                f.write(json.dumps({"seq": rec.seq, "hash": rec.hash, "ts": rec.ts}, sort_keys=True) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+        except OSError:
+            pass
+
+    def _anchor_last(self) -> Optional[dict[str, Any]]:
+        if not self.anchor or not self.anchor.exists():
+            return None
+        last = None
+        try:
+            with open(self.anchor, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        last = json.loads(line)
+        except (OSError, ValueError):
+            return None
+        return last
 
     def _last(self) -> Optional[CustodyRecord]:
         last = None
@@ -165,6 +199,7 @@ class CustodyLog:
             f.write(json.dumps(asdict(rec), sort_keys=True, ensure_ascii=False) + "\n")
             f.flush()
             os.fsync(f.fileno())
+        self._anchor_write(rec)
         return rec
 
     def verify(self) -> tuple[bool, int, Optional[int], str]:
@@ -182,7 +217,14 @@ class CustodyLog:
                 return False, n, rec.seq, "record hash mismatch (record content was altered)"
             prev = rec.hash
             expected_seq += 1
-        return True, n, None, f"chain intact over {n} records"
+        a = self._anchor_last()
+        if a:
+            if a.get("seq", 0) > n:
+                return False, n, n + 1, f"chain truncated: the anchor outside the case folder records {a['seq']} records, the log holds {n}"
+            if a.get("seq") == n and a.get("hash") != prev:
+                return False, n, n, "chain rewritten: the head hash differs from the anchor outside the case folder"
+            return True, n, None, f"chain intact over {n} records, head {prev[:12]}… matches the anchor"
+        return True, n, None, f"chain intact over {n} records, head {prev[:12]}… (no anchor file)"
 
     def tail(self, n: int = 20) -> list[CustodyRecord]:
         recs = list(self.iter_records())

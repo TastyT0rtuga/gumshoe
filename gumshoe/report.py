@@ -116,9 +116,12 @@ def build(case, kind: str = "triage", with_llm: Optional[bool] = None, log=print
                 ["Access mode", meta.get("mode")], ["Analysis host", f"{meta.get('host')} ({meta.get('platform')})"],
                 ["Image SHA-256 (computed)", (ih.get("computed") or {}).get("sha256", "(not computed)")],
                 ["Image MD5 (computed)", (ih.get("computed") or {}).get("md5", "(not computed)")],
-                ["Acquisition hash match", {True: "MATCH", False: "MISMATCH", None: "not compared"}.get(ih.get("match"))],
+                ["Acquisition hash match", {True: "MATCH", False: "MISMATCH - the evidence is not what the acquisition record says",
+                                            None: "NOT VERIFIED - no acquisition hash was given; nothing in this report rests on a verified image"}.get(ih.get("match"))],
+                ["Evidence verified", "yes" if ih.get("match") is True else "NO"],
                 ["Read-only verification", meta.get("readonly_check", {}).get("reason", "not run") if isinstance(meta.get("readonly_check"), dict) else "not run"],
-                ["Custody chain", chain_msg]]
+                ["Custody chain", chain_msg],
+                ["Custody head at report time", "record %d, hash %s" % case.custody.head()]]
         parts.append("## 1. Case information\n\n" + _table(["Item", "Value"], rows) + "\n")
         parts.append("## 2. Scope and objectives\n\n" + (meta.get("notes") or "_Enter scope in case notes (`gumshoe init --notes`)._") + "\n")
         # ---- 3. methodology ------------------------------------------------

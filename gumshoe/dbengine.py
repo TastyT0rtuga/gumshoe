@@ -83,6 +83,20 @@ def _du(path: Path) -> int:
     return total
 
 
+def _mounted_as(path: Path, fstype: str) -> bool:
+    """True when /proc/mounts shows a mount of `fstype` exactly at `path`."""
+    want = str(path).replace(" ", "\\040")
+    try:
+        with open("/proc/mounts", "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 3 and parts[1] == want and parts[2] == fstype:
+                    return True
+    except OSError:
+        return False
+    return False
+
+
 class PrivateMariaDB:
     """with PrivateMariaDB(datadir, work, log) as db: db.query(...) / db.stream(...)"""
 
@@ -133,6 +147,12 @@ class PrivateMariaDB:
                 return str(x).replace("\\", "\\\\").replace(",", "\\,").replace(":", "\\:")
             r = subprocess.run(["mount", "-t", "overlay", "overlay", "-o", f"lowerdir={_ovl(self.datadir)},upperdir={_ovl(up)},workdir={_ovl(wd)}", str(self.data)],
                                capture_output=True, text=True, errors="replace")
+            if r.returncode == 0 and not _mounted_as(self.data, "overlay"):
+                # mount said yes but /proc/mounts does not show an overlay there: never start the server on that path
+                r_last = "mount reported success but no overlay is mounted at the data path"
+                subprocess.run(["umount", "-l", str(self.data)], capture_output=True)
+                last = r_last
+                continue
             if r.returncode == 0:
                 self.mode = "overlay"
                 self._overlay_mounted = True
@@ -176,16 +196,22 @@ class PrivateMariaDB:
         return shutil.which("mariadb") or shutil.which("mysql") or "mariadb"
 
     def _cmd(self, level: int) -> list[str]:
+        # --skip-grant-tables also keeps the server from loading mysql.plugin / mysql.func entries (both servers), so a .so
+        # named by the seized datadir is never dlopen()ed; --skip-symbolic-links refuses DATA DIRECTORY / .sym escapes;
+        # --secure-file-priv confines LOAD DATA / INTO OUTFILE to the work folder; MySQL 8 is told not to read the datadir's
+        # mysqld-auto.cnf (SET PERSIST would otherwise set a log path or similar as root)
         common = [f"--datadir={self.data}", f"--socket={self.sock}", "--skip-networking", "--skip-grant-tables", "--skip-log-bin",
+                  "--skip-symbolic-links", f"--secure-file-priv={self.work / 'tmp'}",
                   f"--log-error={self.err}", f"--pid-file={self.work / 'mariadbd.pid'}", f"--tmpdir={self.work / 'tmp'}",
                   f"--innodb-buffer-pool-size={self.buffer_pool}", f"--innodb-force-recovery={level}", "--event-scheduler=OFF",
                   "--skip-name-resolve", "--innodb-flush-log-at-trx-commit=0", "--max-allowed-packet=1G",
                   "--net-read-timeout=3600", "--net-write-timeout=3600", "--wait-timeout=86400"]
         if self.engine == "mysql8":
-            share = MYSQL8_ROOT / "usr" / "share" / "mysql-8.0"
+            share = next((d for d in (MYSQL8_ROOT / "usr" / "share" / "mysql-8.0", MYSQL8_ROOT / "usr" / "share" / "mysql") if (d / "english" / "errmsg.sys").exists()),
+                         MYSQL8_ROOT / "usr" / "share" / "mysql-8.0")      # Ubuntu's package puts errmsg.sys under share/mysql
             cmd = [str(MYSQL8_ROOT / "usr" / "sbin" / "mysqld"), "--no-defaults", f"--basedir={MYSQL8_ROOT / 'usr'}",
                    f"--lc-messages-dir={share}", f"--plugin-dir={MYSQL8_ROOT / 'usr' / 'lib' / 'mysql' / 'plugin'}", "--mysqlx=OFF",
-                   "--upgrade=MINIMAL", "--secure-file-priv=", "--skip-replica-start", "--performance-schema=OFF"] + common
+                   "--upgrade=MINIMAL", "--persisted-globals-load=OFF", "--skip-replica-start", "--performance-schema=OFF"] + common
         else:
             exe = shutil.which("mariadbd") or shutil.which("mysqld") or "mariadbd"
             cmd = [exe, "--no-defaults", "--skip-slave-start"] + common
@@ -193,11 +219,52 @@ class PrivateMariaDB:
             cmd.append("--user=root")
         return cmd
 
+    def _sandbox(self, cmd: list[str]) -> tuple[list[str], dict]:
+        """The server command wrapped in a private mount namespace where every mount is read-only except its own work
+        folder and the overlay: a datadir that names an absolute path (a tablespace, a log file, a DATA DIRECTORY) can
+        then not write outside them - not into the case folder, the exports, a Windows drive or a share. Needs root and
+        util-linux's unshare; otherwise the command runs as it is and the custody record says so."""
+        if not (hasattr(os, "geteuid") and os.geteuid() == 0) or not shutil.which("unshare"):
+            return cmd, {"sandbox": "none (not root or no unshare)"}
+        keep = (str(self.data), "/proc", "/sys", "/dev", "/run")
+        targets: list[str] = []
+        try:
+            with open("/proc/self/mounts", "r", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    parts = line.split()
+                    if len(parts) < 4:
+                        continue
+                    mp = parts[1].replace("\\040", " ")
+                    if any(mp == k or mp.startswith(k.rstrip("/") + "/") for k in keep):
+                        continue
+                    if mp == str(self.work) or mp.startswith(str(self.work) + "/"):
+                        continue
+                    targets.append(mp)
+        except OSError:
+            return cmd, {"sandbox": "none (/proc/self/mounts unreadable)"}
+        targets.sort(key=len, reverse=True)
+        q = " ".join("'" + t.replace("'", "'\\''") + "'" for t in targets)
+        # the work folder is bound first, while its source is still read-write (a bind copies the source mount's flags), and
+        # with --rbind so the overlay mounted under it comes along; then every other mount is made read-only
+        script = (
+            "fail=''\n"
+            f"mount --rbind '{self.work}' '{self.work}' || exit 97\n"
+            f"for mp in {q}; do err=$(mount -o remount,bind,ro \"$mp\" 2>&1) || fail=\"$fail $mp ($err);\"; done\n"
+            "[ -n \"$fail\" ] && echo \"sandbox: could not make read-only:$fail\" >&2\n"
+            "exec \"$@\"\n")
+        return (["unshare", "--mount", "--propagation", "private", "/bin/sh", "-c", script, "gumshoe-dbsandbox"] + cmd,
+                {"sandbox": "mount namespace, all mounts read-only except the work folder and the overlay", "read_only": len(targets), "writable": [str(self.work), str(self.data)]})
+
     def _start(self, level: int) -> subprocess.Popen:
         cmd = self._cmd(level)
+        wrapped, sb = self._sandbox(cmd)
         with open(self.err, "ab") as errf:
-            p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=errf, env=self._env())
-        self._custody("db_server_started", {"cmd": cmd, "force_recovery": level, "engine": self.engine})
+            p = subprocess.Popen(wrapped, stdout=subprocess.DEVNULL, stderr=errf, env=self._env())
+        if "namespace" in sb.get("sandbox", ""):
+            self.log(f"[db] server started in a mount namespace: {sb['read_only']} mounts read-only, only its work folder and the overlay writable")
+        else:
+            self.log(f"[db] server started without a mount sandbox ({sb['sandbox']})")
+        self._custody("db_server_started", {"cmd": cmd, "force_recovery": level, "engine": self.engine, **sb})
         return p
 
     def _alive(self) -> bool:

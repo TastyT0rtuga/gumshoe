@@ -109,7 +109,7 @@ DELIMITER ;;
 END */;;
 DELIMITER ;
 INSERT INTO `b` VALUES (3,NULL,NULL,'after trigger');
-""", {"dump.b": [["1", "ab", "1", "Hello"], ["2", "0x00FF", "0", "x"], ["3", "", "", "after trigger"]], "_allow_extra": ["dump.log"]})
+""", {"dump.b": [["1", "ab", "1", "Hello"], ["2", "0x00FF", "0", "x"], ["3", "", "", "after trigger"]], })
 
 FIX["one_line_table_no_newline_at_all"] = ("CREATE TABLE `o` (`i` int, `s` varchar(20)); INSERT INTO `o` VALUES " + ",".join(f"({i},'row {i}')" for i in range(20000)) + ";",
                                              {"dump.o": [[str(i), f"row {i}"] for i in range(20000)]})
@@ -141,10 +141,82 @@ INSERT INTO `e` VALUES (2);
 FIX["long_create_string_across_boundary"] = ("CREATE TABLE `big` (`id` int COMMENT '" + "x;y " * 80000 + "', `v` text);\nINSERT INTO `big` VALUES (1,'a'),(2,'b');\n",
                                              {"dump.big": [["1", "a"], ["2", "b"]], "_headers": {"dump.big": ["id", "v"]}, "_min_chunk": 4096})
 
+# ---- fixtures from the second review round (NO_BACKSLASH_ESCAPES, comments in VALUES, introducers, routine bodies, column guard)
+FIX["nbe_mode_marker"] = ("""/*!40101 SET SQL_MODE='NO_BACKSLASH_ESCAPES' */;
+CREATE TABLE `w` (`id` int, `path` text, `note` text);
+INSERT INTO `w` VALUES (1,'C:\\Users\\','it''s'),(2,'a\\nb','plain');
+""", {"dump.w": [["1", "C:\\Users\\", "it's"], ["2", "a\\nb", "plain"]]})
+
+FIX["nbe_mode_by_content"] = ("""CREATE TABLE `w` (`id` int, `path` text);
+INSERT INTO `w` VALUES (1,'C:\\Users\\bob'),(2,'D:\\data\\x'),(3,'O''Brien');
+""", {"dump.w": [["1", "C:\\Users\\bob"], ["2", "D:\\data\\x"], ["3", "O'Brien"]]})
+
+FIX["mysql_mode_backslashes"] = ("""-- MySQL dump 10.13
+CREATE TABLE `w` (`id` int, `path` text, `q` text);
+INSERT INTO `w` VALUES (1,'C:\\\\Users\\\\bob','it\\'s'),(2,'tab\\there','a\\\\''b');
+""", {"dump.w": [["1", "C:\\Users\\bob", "it's"], ["2", "tab\there", "a\\'b"]]})
+
+FIX["comments_in_values"] = ("""CREATE TABLE `c` (`a` int, `b` text);
+INSERT INTO `c` VALUES (1 /* ) */, 'a'), /* between rows */ (2, 'b') -- trailing comment
+, (3, 'c'), # hash comment
+(4, 'd');
+INSERT INTO `c` VALUES (5, 'e');
+""", {"dump.c": [["1", "a"], ["2", "b"], ["3", "c"], ["4", "d"], ["5", "e"]]})
+
+FIX["introducers_and_expressions"] = ("""CREATE TABLE `i` (`a` int, `b` text, `c` text, `d` text, `e` text, `f` int, `g` text);
+INSERT INTO `i` VALUES (1, _utf8mb4'admin@site.com', _binary 'xx', _latin1"dq", N"nat", (-1), 0x4142);
+""", {"dump.i": [["1", "admin@site.com", "xx", "dq", "nat", "(-1)", "AB"]]})
+
+FIX["trigger_body_not_data"] = ("""CREATE TABLE `log` (`id` int, `what` text);
+INSERT INTO `log` VALUES (1,'real');
+DELIMITER ;;
+/*!50003 CREATE*/ /*!50003 TRIGGER `tr` BEFORE INSERT ON `b` FOR EACH ROW BEGIN
+  INSERT INTO log VALUES (NEW.id, 'phantom');
+  INSERT INTO `log` VALUES (99, 'phantom; with semicolon');
+END */;;
+DELIMITER ;
+INSERT INTO `log` VALUES (2,'real too');
+""", {"dump.log": [["1", "real"], ["2", "real too"]]})
+
+FIX["procedure_dollar_delimiter"] = ("""CREATE TABLE `log` (`id` int, `what` text);
+DELIMITER $$
+CREATE PROCEDURE `p`() BEGIN
+INSERT INTO log VALUES (1, 'phantom');
+END$$
+DELIMITER ;
+INSERT INTO `log` VALUES (2,'real');
+""", {"dump.log": [["2", "real"]]})
+
+FIX["single_statement_trigger"] = ("""CREATE TABLE `log` (`id` int);
+CREATE TRIGGER `t` AFTER INSERT ON `a` FOR EACH ROW
+  INSERT INTO log VALUES (NEW.id);
+INSERT INTO `log` VALUES (7);
+""", {"dump.log": [["7"]]})
+
+FIX["column_count_guard"] = ("""CREATE TABLE `g` (`a` int, `b` int, `c` int);
+INSERT INTO `g` VALUES (1,2,3),(4,5),(6,7,8),(9,10,11,12);
+""", {"dump.g": [["1", "2", "3"], ["6", "7", "8"]], "_rejected": {"dump.g": 2}})
+
+FIX["explicit_column_list_remap"] = ("""CREATE TABLE `r` (`a` int, `b` int, `c` int);
+INSERT INTO `r` (`c`, `a`) VALUES (3, 1);
+INSERT INTO `r` VALUES (1, 2, 3);
+INSERT INTO r (b) VALUES (5);
+""", {"dump.r": [["1", "", "3"], ["1", "2", "3"], ["", "5", ""]], "_headers": {"dump.r": ["a", "b", "c"]}})
+
+FIX["rows_on_lines_boundaries"] = ("CREATE TABLE `l` (`i` int, `s` text);\nINSERT INTO `l` VALUES\n" + ",\n".join(f"({i}, 'r{i}')" for i in range(60)) + ";\n",
+                                   {"dump.l": [[str(i), f"r{i}"] for i in range(60)]})
+
+FIX["insert_set_counted_not_data"] = ("""CREATE TABLE `s` (`a` int, `b` int);
+INSERT INTO `s` SET a=1, b=2;
+INSERT INTO `s` VALUES (3,4);
+""", {"dump.s": [["3", "4"]]})
+
 
 def read_headers(out: Path):
     heads = {}
     for f in sorted(out.rglob("*.csv")):
+        if f.name.endswith(".rejected.csv"):
+            continue
         key = f"{f.parent.name}.{f.name.split('.')[0]}"
         with open(f, encoding="utf-8-sig", newline="") as fh:
             heads.setdefault(key, next(csv.reader(fh), None))
@@ -154,6 +226,8 @@ def read_headers(out: Path):
 def read_rows(out: Path):
     got = {}
     for f in sorted(out.rglob("*.csv")):
+        if f.name.endswith(".rejected.csv"):
+            continue
         key = f"{f.parent.name}.{f.name.split('.')[0]}"
         with open(f, encoding="utf-8-sig", newline="") as fh:
             rd = csv.reader(fh)
@@ -184,6 +258,13 @@ for name, (text, expected) in FIX.items():
             if heads.get(k) != h:
                 print(f"BAD {name:38s} {mode}: header of {k} = {heads.get(k)} expected {h}")
                 ok_all = False
+        for k, n in expected.get("_rejected", {}).items():
+            db_, tb_ = k.split(".", 1)
+            rf = out / db_ / f"{tb_}.rejected.csv"
+            got_n = (sum(1 for _ in open(rf, encoding="utf-8-sig")) - 1) if rf.exists() else 0
+            if got_n != n:
+                print(f"BAD {name:38s} {mode}: rejected rows of {k} = {got_n} expected {n}")
+                ok_all = False
         allow = set(expected.get("_allow_extra", []))
         exp = {k: v for k, v in expected.items() if not k.startswith("_")}
         extra = {k for k in got if k not in exp and k not in allow}
@@ -211,7 +292,7 @@ def run_chunked(text: str, chunk: int):
     def writer_for(db, table, cols):
         key = (db, table)
         if key not in writers:
-            writers[key] = dbexport.TableWriter(out / dbexport.slug(db), dbexport.slug(table), cols or columns.get(key) or [], 10**9)
+            writers[key] = dbexport.TableWriter(out / dbexport.slug(db), dbexport.slug(table), columns.get(key) or cols or [], 10**9)
         return writers[key]
 
     def on_create(db, table, text):
@@ -219,12 +300,15 @@ def run_chunked(text: str, chunk: int):
         if (db, table) in writers and not writers[(db, table)].columns:
             writers[(db, table)].columns = columns[(db, table)]
 
-    dbexport.parse_mysql_dump(dbexport._byte_chunks(src, 0, src.stat().st_size, chunk), writer_for, on_create, None, None)
+    backslash, _why = dbexport.detect_backslash_escapes(text[:2**20])
+    dbexport.parse_mysql_dump(dbexport._byte_chunks(src, 0, src.stat().st_size, chunk), writer_for, on_create, None, None, backslash=backslash)
     got, heads = {}, {}
     for (db, table), w in writers.items():
         w.close()
         rows = []
         for f in sorted((out / dbexport.slug(db)).glob(dbexport.slug(table) + "*.csv")):
+            if f.name.endswith(".rejected.csv"):
+                continue
             with open(f, encoding="utf-8-sig", newline="") as fh:
                 rd = csv.reader(fh)
                 heads.setdefault(f"{db}.{table}", next(rd, None))

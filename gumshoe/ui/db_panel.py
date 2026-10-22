@@ -154,9 +154,19 @@ def _body(case, root: Path, cases_root: Path):
                         f" · {e.get('seconds', 0):.0f} s  \nfolder **`{to_windows(e.get('out', ''))}`**")
             out = Path(e.get("out", ""))
             tcsv = Path(e["dir"]) / "tables.csv"
+            stx = e.get("stats") or {}
+            if stx:
+                st.caption("what the reader saw: " + ", ".join(f"{stx.get(k, 0)} {lbl}" for k, lbl in (("inserts", "INSERTs"), ("rows", "rows"), ("creates", "CREATE TABLEs"), ("routines", "routine bodies skipped"),
+                                                                                                  ("skipped", "other statements skipped"), ("malformed", "rows not understood"), ("rejected", "rows with the wrong number of values")) if k in stx)
+                           + ((" · " + "; ".join(str(n) for n in stx.get("notes", [])[:2])) if stx.get("notes") else ""))
             if tcsv.exists():
                 tdf = pd.read_csv(tcsv, dtype=str, keep_default_na=False)
                 st.dataframe(tdf, hide_index=True, width="stretch")
+                if "rejected" in tdf.columns and any(v not in ("", "0") for v in tdf["rejected"]):
+                    st.caption("rejected: rows whose number of values differs from the table's columns - kept in `<table>.rejected.csv` next to the table, "
+                               "not in it (a column shift is never written silently).")
+                if "error" in tdf.columns and any(str(v).startswith("partial") for v in tdf["error"]):
+                    st.warning("this export stopped early (see the error column): the rows written before the stop are here and indexed; fix the cause and extract again")
                 choices = [f"{r['database']}/{r['table']}" for _, r in tdf.iterrows() if r["files"]]
                 pick = st.selectbox("Preview a table (first 200 rows)", ["-"] + choices, key=f"pv_{e['name']}")
                 if pick != "-":

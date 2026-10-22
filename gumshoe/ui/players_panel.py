@@ -67,6 +67,8 @@ def render_players_tab(case, root: Path, cases_root: Path):
 
 
 def _players_list(case, con):
+    st.caption("A player is a cluster of account rows sharing an e-mail, phone, wallet, IBAN, card or SSH key - not a head count: one person "
+               "with two e-mails is two players until something joins them, and every merge is shown in the dossier under Merged over.")
     q = st.text_input("Filter players (any identifier, name, wallet, IP ...)", key="pl_q")
     rows = players.list_players(con, limit=500, q=q.strip())
     if not rows:
@@ -120,9 +122,19 @@ def _dossier(case, con, pid: int):
         st.markdown("**Activity by day** (rows and log lines carrying this player's identifiers)")
         adf = pd.DataFrame(d["activity"]).set_index("day")
         st.bar_chart(adf["n"], height=180)
-    if d["money_summary"]:
+    if d["money_summary"] or d.get("money_ambiguous"):
         st.markdown("**Money**")
-        st.dataframe(pd.DataFrame(d["money_summary"]), hide_index=True, width="stretch")
+        if d["money_summary"]:
+            st.dataframe(pd.DataFrame(d["money_summary"]), hide_index=True, width="stretch")
+            if any(m.get("via_linked_wallet") for m in d["money_summary"]):
+                st.caption("via_linked_wallet: rows reached only through a wallet or txid linked to this player by co-occurrence, not through an account row - "
+                           "it may be a counterparty's address; transactions.csv marks them `linked`.")
+        if d.get("money_ambiguous"):
+            st.caption(f"{len(d['money_ambiguous'])} transaction row(s) name this player together with another player (sender and receiver, say) and are "
+                       "not counted above - unattributed_money.csv lists them.")
+            with st.expander(f"rows naming this and another player ({len(d['money_ambiguous'])})"):
+                st.dataframe(pd.DataFrame([{"ts": a["ts"], "amount": a["amount"], "currency": a["currency"], "players": ", ".join(str(c) for c in json.loads(a["candidates"] or "[]")),
+                                            "table": f"{a['db']}.{a['table_']}", "row": a["row"]} for a in d["money_ambiguous"][:500]]), hide_index=True, width="stretch")
         with st.expander(f"transactions ({len(d['money'])})"):
             st.dataframe(pd.DataFrame([{"ts": m["ts"], "amount": m["amount"], "currency": m["currency"], "table": f"{m['db']}.{m['table_']}", "row": m["row"],
                                         "identifiers": "; ".join(f"{t}={v}" for t, v in json.loads(m["idents"] or "[]"))} for m in d["money"][:2000]]),
