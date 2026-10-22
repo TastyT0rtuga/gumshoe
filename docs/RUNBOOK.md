@@ -174,7 +174,10 @@ or without `;`. A cell longer than Excel's limit (32,767 characters) is saved as
 with a pointer in the cell; binary cells likewise. Each source gets its own folder named `<parent>-<file>-<hash>`
 (`db-dump_sw.sql-341566`), so dumps that share a long path never overwrite each other. The extraction log says
 what the reader recognised (INSERTs, CREATE TABLEs, other statements skipped, malformed); if a `.sql` yields 0
-tables, send its first lines (`head -c 2000`) so the dialect can be added.
+tables, send its first lines (`head -c 2000`) so the dialect can be added. A row the reader cannot make sense
+of is skipped and logged with its position (the rest of the statement is still read); an extraction that
+stops half-way (disk full) keeps every row written so far and is marked `partial:` with the reason in
+`tables.csv` and the Databases tab - re-run it after fixing the cause.
 Search every exported table from the tab (name, e-mail, phone, IP ...), case-insensitive, any script.
 
 ### What is it built on: the fingerprint
@@ -230,10 +233,14 @@ document path) so you can go and look.
   numbers (Luhn-checked), SSH key fingerprints, usernames, names, domains, URLs - each validated, normalised
   (`+1 (555) 010-0100` and `15550100100` are one phone), with counts, first/last seen, and where.
 - **Players**: account-like rows (a row holding an e-mail or username plus a name/phone/password hash) are
-  merged only over **strong** identifiers - e-mail, phone, wallet, password hash, IBAN, card, SSH key,
-  transaction id. Never over IPs, usernames or names (shared infrastructure must not fuse people). An
-  identifier seen in more than 50 account rows (a placeholder e-mail, a default hash) links nothing. Foreign
-  keys are followed: `logins.customer_id` joins the customer, so the login's IP and time belong to the player.
+  merged only over **strong** identifiers - e-mail, phone, wallet, IBAN, card, SSH key. Never over IPs,
+  usernames, names, password hashes or transaction ids (shared infrastructure must not fuse people; two
+  accounts with the same default hash are two accounts; a txid sits on both sides of a trade) - those
+  **link** players without merging them. An identifier seen in too many account rows (an e-mail in more
+  than 50, a phone in more than 20: a placeholder, a support line) merges nothing. Every dossier shows
+  **Merged over**: the identifier and the exact rows it joined - check it before relying on the merge.
+  Foreign keys are followed: `logins.customer_id` joins the customer, so the login's IP and time belong
+  to the player.
 - **Linked / shared**: IPs, domains, wallets, names reached through rows and log lines carrying the player's
   strong identifiers; an IP used by 8 or more players is marked **shared** (proxy, NAT, the office) instead
   of being treated as that player's.

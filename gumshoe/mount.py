@@ -32,6 +32,23 @@ def find_mount(path: Path) -> Optional[tuple[str, str, str, str]]:
     return best
 
 
+def holder_of(image_path) -> dict:
+    """How the filesystem holding the image *file* is mounted (the drvfs share or drive, a loop device's backing
+    folder): recorded with the read-only check so the custody record says what is and is not guaranteed. The
+    evidence filesystem inside the image is what Gumshoe mounts read-only (checked below); the drive the image
+    file sits on is whatever Windows gave the distro - usually read-write - and nothing in Gumshoe writes there."""
+    if not image_path:
+        return {}
+    try:
+        m = find_mount(Path(str(image_path)).parent)
+    except OSError:
+        m = None
+    if not m:
+        return {"path": str(image_path), "mountpoint": None, "readonly": None}
+    dev, mp, fstype, opts = m
+    return {"path": str(image_path), "mountpoint": mp, "fstype": fstype, "options": opts, "readonly": "ro" in set(opts.split(","))}
+
+
 def check_readonly(mount_root: Path, mode: str) -> dict:
     """Returns {ok, reason, details}. On Linux in mount mode the mountpoint
     must carry the `ro` option. In export mode we only check the folder is

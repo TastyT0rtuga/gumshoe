@@ -112,6 +112,10 @@ def _dossier(case, con, pid: int):
             st.markdown("**Shared infrastructure** (IPs used by many players - proxies, NAT, the office)")
             for e in by["shared"][:30]:
                 st.markdown(f"- `{e['type']}` {e['value']} ×{e['count']} · shared with {e['shared_with']} players")
+    if d.get("glue"):
+        st.markdown("**Merged over** (the identifier that joins these account rows - check it before relying on the merge)")
+        for g in d["glue"]:
+            st.markdown(f"- `{g['type']}` {g['norm']} → rows " + ", ".join(json.loads(g["rows"] or "[]")[:8]))
     if d["activity"]:
         st.markdown("**Activity by day** (rows and log lines carrying this player's identifiers)")
         adf = pd.DataFrame(d["activity"]).set_index("day")

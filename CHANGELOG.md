@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- **Fixes from the independent review of the dump reader and Players** (peer-review brief, section 9).
+  (1) The row pattern could take hours on a row with an unbalanced quote or a cell of thousands of
+  backslashes (exponential backtracking, re-run at every retry); it is now linear (possessive quantifiers)
+  and a row that still does not match is skipped with its position logged, parsing resumes at the next
+  `),(` / `);` / line end instead of swallowing the rest of the statement. (2) Parallel workers were split at
+  line patterns, so a text cell containing `\n-- ` or `INSERT INTO` (a mail archive, a table holding SQL)
+  could start a worker inside a string and lose or invent rows; split points now come from a quote-aware
+  byte scan of statement ends, each worker is told the database in effect at its start, and the results are
+  identical to the sequential reader on every fixture (mail archive, SQL-in-cells, function calls, 515 MB
+  single-line table). (3) An error half-way through a dump (disk full, an undreamt-of construct) no longer
+  throws away the hours of rows already written: the CSVs written so far are closed, indexed and reported as
+  `partial:` with the reason. (4) No worker processes available (no `/dev/shm`, a locked-down host, a worker
+  killed) → the file is read by the main process instead of failing. (5) A statement that never ends is
+  bounded (8 MB, then dropped with its position in the log); a string straddling the read buffer's boundary in a
+  schema statement longer than 256 KB no longer ends the statement at a `;` inside the string; `CREATE DATABASE
+  /*!32312 IF NOT EXISTS*/` is recognised; backticks in table names are escaped on the live-server path;
+  overlay mount options are escaped. (7) The read-only check records how the drive or share holding the image
+  file is mounted (`image_holder`: usually read-write, WSL's choice - the evidence filesystem inside the image is
+  what is mounted and checked read-only), so the custody record says what is guaranteed and what is not.
+  (6) Players: password hashes and transaction ids no longer **merge** account rows (two accounts with the
+  same default or reused hash were fused into one player, and a txid can sit on both sides of a trade); they
+  still link. The promiscuity limit is per type (an e-mail in more than 50 rows, a phone in more than 20 ...).
+  Every dossier now shows **Merged over**: the identifier and the exact rows it joined, so a merge can be
+  checked before anyone relies on it.
 - Launcher: a bundle on a drive WSL has not mounted (a USB drive plugged in after WSL started, a mapped drive) no
   longer stops Gumshoe.bat / the self-test with `wslpath failed for H:\Gumshoe-offline`: the drive is mounted into
   the distro with drvfs first.

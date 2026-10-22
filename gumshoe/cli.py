@@ -53,6 +53,9 @@ def cmd_init(args):
 def cmd_verify(args):
     c = _case(args)
     ro = check_readonly(c.mount_root, c.mode)
+    if c.meta.get("image_path"):
+        from .mount import holder_of
+        ro["image_holder"] = holder_of(c.meta.get("image_path"))
     c.meta["readonly_check"] = {**ro, "at": __import__("gumshoe.integrity", fromlist=["utc_now"]).utc_now()}
     c.save_meta()
     c.custody.append("readonly_check", ro)

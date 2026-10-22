@@ -345,10 +345,16 @@ def _open_text(p: Path):
     return open(p, "r", encoding="utf-8", errors="replace", newline="")
 
 
-_SQ = r"'[^'\\]*(?:(?:\\.|'')[^'\\]*)*'"    # single-quoted string: backslash escapes (mysqldump) and doubled quotes (SQL standard); unrolled loop
-_DQ = r'"[^"\\]*(?:(?:\\.|"")[^"\\]*)*"'
-_ROW_RE = re.compile(r"\((?:" + _SQ + "|" + _DQ + r"|[^()'\"]+)*\)", re.S)
-_FIELD_RE = re.compile(r"\s*" + _SQ + r"|\s*" + _DQ + r"|\s*_binary\s*" + _SQ + r"|\s*[nN]" + _SQ + r"|\s*[xXbB]'[0-9a-fA-F]*'|[^,'\"]+", re.S)
+_SQ = r"'[^'\\]*+(?:(?:\\.|'')[^'\\]*+)*+'"   # single-quoted string: backslash escapes (mysqldump) and doubled quotes (SQL standard); possessive: never backtracks
+_DQ = r'"[^"\\]*+(?:(?:\\.|"")[^"\\]*+)*+"'
+_BQ = r"`[^`]*+(?:``[^`]*+)*+`"                   # backtick-quoted identifier
+_FUNC = r"\w+\((?:" + _SQ + "|" + _DQ + r"|[^()'\"]++)*+\)"       # NOW(), UUID(), ST_GeomFromText('POINT(1 2)') - one level of parentheses
+_PLAIN = r"[^,()'\"]++"                            # an unquoted field: number, NULL, hex, expression without parentheses
+# a complete row: '(' fields separated by ',' ')'. Every quantifier is possessive, so a row cut by the buffer boundary fails in
+# linear time (the old form was exponential on number-heavy rows), and a match can only end at a ')' with balanced quotes.
+_HEXBIT = r"[xXbB]'[0-9a-fA-F]*+'"
+_ROW_RE = re.compile(r"\(\s*+(?:(?:" + _SQ + "|" + _DQ + r"|_binary\s*+" + _SQ + r"|[nN]" + _SQ + "|" + _HEXBIT + "|" + _FUNC + "|" + _PLAIN + r")\s*+(?:,\s*+|(?=\))))*+\)", re.S)
+_FIELD_RE = re.compile(r"\s*+" + _SQ + r"|\s*+" + _DQ + r"|\s*+_binary\s*+" + _SQ + r"|\s*+[nN]" + _SQ + r"|\s*+" + _FUNC + r"|\s*+[xXbB]'[0-9a-fA-F]*+'|" + _PLAIN, re.S)
 _UNESC = {"0": "\x00", "n": "\n", "r": "\r", "t": "\t", "b": "\b", "Z": "\x1a", "\\": "\\", "'": "'", '"': '"', "%": "\\%", "_": "\\_"}
 _BS_RE = re.compile(r"\\(.)", re.S)
 _HEX_RE = re.compile(r"^(?:0[xX]([0-9a-fA-F]+)|[xX]'([0-9a-fA-F]*)')$")
@@ -382,6 +388,8 @@ def _field(t: str):
         return _unescape(t[t.index("'") + 1:-1])
     if (c == "N" or c == "n") and len(t) > 1 and t[1] == "'":      # N'unicode' (T-SQL)
         return _unescape(t[2:-1].replace("''", "'")) if "''" in t else _unescape(t[2:-1])
+    if t[-1] == ")" and "(" in t:                                   # NOW(), ST_GeomFromText('POINT(1 2)'): kept as written
+        return t.strip()
     t = t.strip()
     if t == "NULL" or t == "null":
         return None
@@ -536,8 +544,14 @@ _INSERT_HEAD_RE = re.compile(r"(?:INSERT|REPLACE)\s+(?:LOW_PRIORITY\s+|DELAYED\s
                              r"(?:\((?P<cols>[^)]*)\))?\s*VALUES?\s*", re.I | re.S)       # MySQL/MariaDB, PostgreSQL --inserts, T-SQL ([dbo].[t], no INTO)
 _CREATE_HEAD_RE = re.compile(r"CREATE\s+(?:TEMPORARY\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[`\"]?(?:[`\"]?(?P<db>[^`\".\s(]+)[`\"]?\.)?[`\"]?(?P<t>[^`\"\s(]+)[`\"]?", re.I)
 _USE_HEAD_RE = re.compile(r"USE\s+[`\"]?([^`\";\s]+)", re.I)
-_CREATEDB_HEAD_RE = re.compile(r"CREATE\s+DATABASE\s+(?:IF\s+NOT\s+EXISTS\s+)?[`\"]?([^`\";\s]+)", re.I)
-_TOK_RE = re.compile(_SQ + "|" + _DQ + r"|;|\n|[^'\";\n]+", re.S)   # statement text up to its ';' (quote-aware), newline by newline
+_CREATEDB_HEAD_RE = re.compile(r"CREATE\s+DATABASE\s+(?:/\*!\d*\s*)?(?:IF\s+NOT\s+EXISTS\s*)?(?:\*/\s*)?[`\"]?([^`\";\s/]+)", re.I)
+_TOK_RE = re.compile(_SQ + "|" + _DQ + "|" + _BQ + r"|;|\n|[^'\"`;\n]++|.", re.S)   # statement text up to its ';' (quote-aware), newline by newline
+# after a row the reader could not understand, quote state is unknowable (a lone quote is the usual cause), so the resync takes
+# the EARLIEST row or statement boundary regardless of quotes; the row regex re-validates everything after it, so a wrong pick
+# costs another row, never the rest of the file
+_RESYNC_RE = re.compile(r"\)\s*+,\s*+\(|\)\s*+;|;\s*+\n|[^);]++|.", re.S)
+MAX_ROW_CHARS = 128 * 2**20          # a row (or unmatched stretch) longer than this is given up on and skipped with a note
+STMT_MAX = 8 * 2**20                 # a non-INSERT statement longer than this is skipped (a lone quote cannot swallow the file)
 _KEYWORD_AT_LINE_RE = re.compile(r"[ \t\r]*(?:INSERT|REPLACE|CREATE|DROP|ALTER|GO\b|USE\b|LOCK\b|UNLOCK|SET\b|COMMIT|BEGIN|START\b|DELIMITER|TRUNCATE|GRANT|FLUSH|--|#|/\*)", re.I)
 _SEP_RE = re.compile(r"\s*(,|;)\s*", re.S)
 _WS_RE = re.compile(r"\s+", re.S)
@@ -626,10 +640,15 @@ def _compressed_chunks(src: Path, chunk: int = STREAM_CHUNK):
 def parse_mysql_dump(chunks, writer_for, on_create=None, on_db=None, progress=None, initial_db: str = "dump") -> dict[str, int]:
     """Stream a MySQL/MariaDB dump: INSERT/REPLACE rows go to writer_for(db, table, columns-or-None).write_text_row;
     CREATE TABLE statements go to on_create(db, table, statement_text); USE / CREATE DATABASE switch the database.
-    Returns counters. Malformed input never stops the stream: the parser resyncs at the next statement."""
+    Returns counters (inserts, rows, creates, skipped, malformed, notes). Malformed input costs what it touches, never
+    the rest of the file: a row the reader cannot match is given up after MAX_ROW_CHARS of unmatched text and parsing
+    resumes at the next row or statement boundary; a non-INSERT statement over STMT_MAX is dropped; both are noted with
+    their byte position."""
     st = _TextStream(chunks)
     cur_db = initial_db or "dump"
     stats = {"inserts": 0, "rows": 0, "creates": 0, "skipped": 0, "malformed": 0}
+    notes: list[str] = []
+    stats["notes"] = notes
     rows_since_progress = 0
 
     def skip_statement() -> None:
@@ -638,12 +657,17 @@ def parse_mysql_dump(chunks, writer_for, on_create=None, on_db=None, progress=No
         while True:
             m = _TOK_RE.match(st.buf, st.pos)
             if m is None:
-                # an unterminated quote at the end of the buffer (or a lone quote): more data, or give up on the quote
                 if st.fill():
                     continue
                 st.pos = len(st.buf)
                 return
             tok = m.group(0)
+            if len(tok) == 1 and tok in "'\"`":
+                # a quote without its closing quote in the buffer: usually a string cut by the chunk boundary, so read on
+                # before deciding; a quote still open after STMT_MAX characters, or at the end of the file, is a lone
+                # quote (a broken dump) and is stepped over so the ';' search continues
+                if len(st.buf) - st.pos < STMT_MAX and st.fill():
+                    continue
             if tok == "\n":
                 st.ensure(24)
                 if _KEYWORD_AT_LINE_RE.match(st.buf, m.end()):
@@ -655,17 +679,56 @@ def parse_mysql_dump(chunks, writer_for, on_create=None, on_db=None, progress=No
             if st.pos >= len(st.buf) and not st.fill():
                 return
 
+    def _resync() -> bool:
+        """Skip to the next row start (after '),(') or the end of the statement (');' or ';\\n'), whichever comes first.
+        True when the statement ended, False when positioned at the next row's '('."""
+        while True:
+            m = _RESYNC_RE.match(st.buf, st.pos)
+            if m is None:
+                if st.fill():
+                    continue
+                st.pos = len(st.buf)
+                return True
+            tok = m.group(0)
+            if tok[0] == ")" and tok[-1] == "(":
+                st.pos = m.end() - 1
+                return False
+            st.pos = m.end()
+            if tok[0] == ")" and tok[-1] == ";" or (tok[0] == ";" and tok.endswith("\n")):
+                return True
+            if st.pos >= len(st.buf) and not st.fill():
+                return True
+
     def statement_text() -> str:
         # the text of the statement at pos up to its ';' (schema statements: small; anything over 8 MB is dropped)
         start = st.pos
+        head = st.buf[start:start + 60]
+
+        def too_long() -> str:
+            # over the bound: the statement is dropped (noted with its position), the ';' search goes on from here
+            stats["skipped"] += 1
+            if len(notes) < 20:
+                notes.append(f"statement over {STMT_MAX >> 20} MB skipped near byte {max(st.consumed - (len(st.buf) - start), 0)}: {head!r}")
+            skip_statement()
+            return ""
+
         while True:
             m = _TOK_RE.match(st.buf, st.pos)
             if m is None:
+                if len(st.buf) - start > STMT_MAX:
+                    return too_long()
                 if st.fill(rebase=False):
                     continue
                 st.pos = len(st.buf)
                 return st.buf[start:]
             tok = m.group(0)
+            if len(tok) == 1 and tok in "'\"`":
+                # a string cut by the chunk boundary (its closing quote has not arrived): read on before treating the
+                # quote as lone, within the statement bound
+                if len(st.buf) - start > STMT_MAX:
+                    return too_long()
+                if st.fill(rebase=False):
+                    continue
             if tok == "\n":
                 if len(st.buf) - m.end() < 24:
                     st.fill(rebase=False)
@@ -675,9 +738,8 @@ def parse_mysql_dump(chunks, writer_for, on_create=None, on_db=None, progress=No
             st.pos = m.end()
             if tok == ";":
                 return st.buf[start:st.pos]
-            if st.pos - start > 8 * 2**20:
-                skip_statement()
-                return ""
+            if st.pos - start > STMT_MAX:
+                return too_long()
             if st.pos >= len(st.buf) and not st.fill(rebase=False):
                 return st.buf[start:]
 
@@ -740,11 +802,20 @@ def parse_mysql_dump(chunks, writer_for, on_create=None, on_db=None, progress=No
                     if st.pos < len(st.buf) and st.buf[st.pos] == ";":     # INSERT ... VALUES; with no rows, or trailing ;
                         st.pos += 1
                         break
-                    if st.fill():
+                    # not a complete row at pos: either the buffer ends inside it (read more), or it is not a row the reader
+                    # understands (an unquoted '(' two levels deep, a lone quote, a NO_BACKSLASH_ESCAPES dump ending a cell
+                    # in a backslash ...). Read on while the unmatched stretch is still short; then give the row up and
+                    # resync at the next row or statement boundary outside quotes, so one bad row costs one row.
+                    if len(st.buf) - st.pos < MAX_ROW_CHARS and not st.eof and st.fill():
                         continue
-                    stats["malformed"] += 1          # ran out of input inside a row
-                    st.pos = len(st.buf)
-                    break
+                    stats["malformed"] += 1
+                    where = st.consumed - (len(st.buf) - st.pos)
+                    if stats["malformed"] <= 20:
+                        notes.append(f"row not understood near byte {max(where, 0)} in {table}: {st.buf[st.pos:st.pos + 80]!r}")
+                    end_stmt = _resync()
+                    if end_stmt:
+                        break
+                    continue
                 row = [fld(t) for t in findall(st.buf, rm.start() + 1, rm.end() - 1) if not t.isspace()]   # no copies of the row text
                 if not w.columns:
                     w.columns = [f"col{i + 1}" for i in range(len(row))]
@@ -874,7 +945,32 @@ def extract_dump(src: Path, out: Path, log: Log, kind: str = "mysql-dump", rows_
             last_pct = pct
             log(f"[db] {src.name}: {pct}% ({len(writers)} tables, {sum(w.rows for w in writers.values())} rows, {(time.time() - t0):.0f} s)")
 
-    stats: dict[str, int] = {}
+    stats: dict[str, Any] = {}
+    error = None
+    try:
+        _extract_dump_body(src, kind, writer_for, on_create, schema_lines, progress_at, lambda st_: stats.update(st_))
+    except Exception as e:  # noqa: BLE001 - whatever was written so far is kept and indexed; the error is recorded
+        error = f"{type(e).__name__}: {str(e)[:400]}"
+        log(f"[db] {src.name}: stopped early - {error}; keeping the {sum(w.rows for w in writers.values())} rows written so far")
+    for (db, table), w in sorted(writers.items()):
+        r = w.close()
+        tables.append({"database": db, "table": table, "rows": r["rows"], "columns": len(w.columns), "files": r["files"], "bytes": r["bytes"], "blobs": r["blobs"],
+                       **({"error": "partial: " + error} if error else {})})
+    (out / "schema.sql").write_text("".join(schema_lines), "utf-8")
+    log(f"[db] {src.name}: done - {len(tables)} tables, {sum(t['rows'] for t in tables)} rows in {(time.time() - t0) / 60:.1f} min"
+        + (f" ({stats['inserts']} INSERTs, {stats['creates']} CREATE TABLEs, {stats['skipped']} other statements skipped, {stats['malformed']} malformed)" if stats else ""))
+    if stats and stats.get("malformed"):
+        log(f"[db] {src.name}: {stats['malformed']} row(s) not understood (skipped): " + "; ".join(stats.get("notes", [])[:3]))
+    if stats and not tables:
+        log("[db]   no INSERT or CREATE TABLE statement was recognised: not a MySQL/MariaDB dump, or a dialect the reader does not know - "
+            "send the first lines of the file (head -c 2000) so it can be added")
+    r = {"tables": tables, "seconds": round(time.time() - t0, 1), "stats": stats}
+    if error:
+        r["error"] = error
+    return r
+
+
+def _extract_dump_body(src: Path, kind: str, writer_for, on_create, schema_lines: list[str], progress_at, set_stats) -> None:
     if kind == "pg-dump":
         with _open_text(src) as f:
             raw = getattr(f, "buffer", None)
@@ -900,17 +996,7 @@ def extract_dump(src: Path, out: Path, log: Log, kind: str = "mysql-dump", rows_
                     schema_lines.append("\n")
     else:
         chunks, pos_fn = _chunk_source(src)
-        stats = parse_mysql_dump(chunks, writer_for, on_create, None, lambda consumed: progress_at(pos_fn()))
-    for (db, table), w in sorted(writers.items()):
-        r = w.close()
-        tables.append({"database": db, "table": table, "rows": r["rows"], "columns": len(w.columns), "files": r["files"], "bytes": r["bytes"], "blobs": r["blobs"]})
-    (out / "schema.sql").write_text("".join(schema_lines), "utf-8")
-    log(f"[db] {src.name}: done - {len(tables)} tables, {sum(t['rows'] for t in tables)} rows in {(time.time() - t0) / 60:.1f} min"
-        + (f" ({stats['inserts']} INSERTs, {stats['creates']} CREATE TABLEs, {stats['skipped']} other statements skipped, {stats['malformed']} malformed)" if stats else ""))
-    if stats and not tables:
-        log("[db]   no INSERT or CREATE TABLE statement was recognised: not a MySQL/MariaDB dump, or a dialect the reader does not know - "
-            "send the first lines of the file (head -c 2000) so it can be added")
-    return {"tables": tables, "seconds": round(time.time() - t0, 1), "stats": stats}
+        set_stats(parse_mysql_dump(chunks, writer_for, on_create, None, lambda consumed: progress_at(pos_fn())))
 
 
 # --------------------------------------------------------------------------- parallel dump parsing
@@ -918,70 +1004,93 @@ PARALLEL_MIN_BYTES = 512 * 2**20
 _STMT_STARTS = (b"INSERT INTO", b"REPLACE INT", b"CREATE TABL", b"DROP TABLE ", b"LOCK TABLES", b"UNLOCK TABL", b"-- ", b"/*!40000 AL", b"USE `", b"CREATE DATA")
 
 
-_SPLIT_RE = re.compile(rb"\n(?:INSERT |REPLACE |CREATE TABLE|DROP TABLE |LOCK TABLES|UNLOCK TABLES|-- |/\*!40000 ALTER|USE `|CREATE DATABASE|GO\r?\n)", re.I)
+# A quote-aware byte scan finds statement ends (';' outside strings, identifiers and comments) and the database in effect
+# at each of them. Split points for the parallel workers are taken only from there, so a range never starts inside a
+# text cell that happens to contain "\n-- \n" (an e-mail signature) or "INSERT INTO" (a table holding SQL) - the previous
+# line-pattern scan did exactly that and lost whole worker ranges.
+_BTOK_RE = re.compile(rb"'[^'\\]*+(?:(?:\\.|'')[^'\\]*+)*+'|\"[^\"\\]*+(?:(?:\\.|\"\")[^\"\\]*+)*+\"|`[^`]*+`|--[ \t][^\n]*+|\n#[^\n]*+|"
+                      rb"/\*(?!!)[^*]*+\*+(?:[^/*][^*]*+\*+)*+/|;|[^'\"`;/\n#-]++|.", re.S)
+_BDB_RE = re.compile(rb"(?:\s|--[^\n]*\n)*+(?:USE\s+[`\"]?([^`\";\s]+)|CREATE\s+DATABASE\s+(?:/\*!\d*\s*)?(?:IF\s+NOT\s+EXISTS\s*)?(?:\*/\s*)?[`\"]?([^`\";\s/]+))", re.I)
+SCAN_CHUNK = 8 * 2**20
 
 
-def _split_points(src: Path, n: int) -> list[int]:
-    """Byte offsets that start a statement line, spread evenly: each worker parses [p[i], p[i+1]). Found by scanning
-    chunks (never readline: a dump may keep a whole table on one multi-GB line)."""
+def scan_statement_ends(src: Path, targets: list[int], log: Optional[Log] = None) -> tuple[list[tuple[int, str]], int]:
+    """For each target byte offset, the first statement end at or after it (offset just past the ';') with the database in
+    effect there. One sequential pass at C speed; strings and comments are skipped as tokens, so nothing inside them counts.
+    Returns ([(offset, db)], statements_seen)."""
+    out: list[tuple[int, str]] = []
+    ti = 0
+    cur_db = "dump"
+    n_stmt = 0
+    size = src.stat().st_size
+    with open(src, "rb") as f:
+        buf = b""
+        base = 0           # file offset of buf[0]
+        pos = 0
+        eof = False
+        last_log = 0
+
+        def refill() -> bool:
+            nonlocal buf, base, pos, eof
+            b = f.read(SCAN_CHUNK)
+            if not b:
+                eof = True
+                return False
+            buf = buf[pos:] + b
+            base += pos
+            pos = 0
+            return True
+
+        while ti < len(targets):
+            if pos >= len(buf):
+                if not refill():
+                    break
+            if log and base - last_log >= 1024 * 2**20:
+                last_log = base
+                log(f"[db] scanning statement boundaries: {int(base * 100 / max(size, 1))}%")
+            m = _BTOK_RE.match(buf, pos)
+            if m is None:
+                # an unterminated string reaching the end of the buffer: more data, or (at EOF / past the row bound) give up on the quote
+                if not eof and len(buf) - pos < MAX_ROW_CHARS and refill():
+                    continue
+                pos += 1
+                continue
+            if m.end() >= len(buf) and not eof and m.group(0)[:1] != b";":
+                # the token may continue in the next chunk: refill and re-match from its start
+                if refill():
+                    continue
+            tok0 = m.group(0)[:1]
+            pos = m.end()
+            if tok0 == b";":
+                n_stmt += 1
+                off = base + pos
+                if len(buf) - pos < 4096 and not eof:
+                    refill()
+                dm = _BDB_RE.match(buf, pos)
+                if dm:
+                    cur_db = (dm.group(1) or dm.group(2) or b"dump").decode("utf-8", "replace")
+                while ti < len(targets) and off >= targets[ti]:
+                    if not out or out[-1][0] != off:
+                        out.append((off, cur_db))
+                    ti += 1
+    return out, n_stmt
+
+
+def _split_points(src: Path, n: int, log: Optional[Log] = None) -> list[tuple[int, str]]:
+    """[(start offset, database in effect)] for n ranges: statement boundaries found by the quote-aware scan, spread evenly."""
     size = src.stat().st_size
     step = size // n
-    points = [0]
-    with open(src, "rb") as f:
-        for i in range(1, n):
-            target = i * step
-            f.seek(target)
-            found = None
-            scanned = 0
-            while scanned < 256 * 2**20:           # a statement start within 256 MB of the target, else no split here
-                base = f.tell()
-                b = f.read(2**20)
-                if not b:
-                    break
-                m = _SPLIT_RE.search(b)
-                if m is not None and (m.start() + 1 < len(b) - 1 or True):
-                    found = base + m.start() + 1
-                    break
-                scanned += len(b)
-                f.seek(base + len(b) - 20)          # overlap so a start spanning chunks is not missed
-            if found is not None and found < size:
-                points.append(found)
-    points.append(size)
-    return sorted(set(points))
-
-
-_DBSWITCH_RE = re.compile(rb"\n(?:USE\s+[`\"]?([^`\";\s]+)|CREATE\s+DATABASE\s+(?:IF\s+NOT\s+EXISTS\s+)?[`\"]?([^`\";\s]+))", re.I)
-
-
-def _db_switches(src: Path) -> list[tuple[int, str]]:
-    """(byte offset, database) for every USE / CREATE DATABASE at a line start, so a byte-range worker knows which
-    database its first statements belong to."""
-    out: list[tuple[int, str]] = []
-    with open(src, "rb") as f:
-        base = 0
-        carry = b""
-        while True:
-            b = f.read(8 * 2**20)
-            if not b:
-                break
-            buf = carry + b
-            for m in _DBSWITCH_RE.finditer(buf):
-                name = (m.group(1) or m.group(2) or b"").decode("utf-8", "replace")
-                if name:
-                    out.append((base - len(carry) + m.start(), name))
-            carry = buf[-256:]
-            base += len(b)
-    return out
-
-
-def _db_at(switches: list[tuple[int, str]], offset: int) -> str:
-    db = "dump"
-    for off, name in switches:
-        if off < offset:
-            db = name
-        else:
-            break
-    return db
+    targets = [i * step for i in range(1, n)]
+    ends, _ = scan_statement_ends(src, targets, log)
+    points = [(0, "dump")] + [(o, db) for o, db in ends if 0 < o < size]
+    seen = set()
+    uniq = []
+    for o, db in points:
+        if o not in seen:
+            seen.add(o)
+            uniq.append((o, db))
+    uniq.sort()
+    return uniq
 
 
 def _dump_worker(args) -> dict[str, Any]:
@@ -1014,11 +1123,15 @@ def _dump_worker(args) -> dict[str, Any]:
             last = pct
             print(f"[db] worker {idx}: {pct}% ({sum(x.rows for x in writers.values())} rows, {time.time() - t0:.0f} s)", flush=True)
 
-    stats = parse_mysql_dump(_byte_chunks(src, start, end), writer_for, on_create, None, prog, initial_db=initial_db)
+    try:
+        stats = parse_mysql_dump(_byte_chunks(src, start, end), writer_for, on_create, None, prog, initial_db=initial_db)
+    except Exception as e:  # noqa: BLE001
+        stats = {"inserts": 0, "rows": sum(w.rows for w in writers.values()), "creates": 0, "skipped": 0, "malformed": 0,
+                 "notes": [f"worker {idx} stopped early: {type(e).__name__}: {str(e)[:300]}"], "error": f"{type(e).__name__}: {str(e)[:300]}"}
     tables = {}
     for key, w in writers.items():
         r = w.close()
-        tables[key] = {"rows": r["rows"], "files": r["files"], "columns": list(w.columns), "placeholder": bool(w.columns) and w.columns[0] == "col1" and key not in columns}
+        tables[key] = {"rows": r["rows"], "files": r["files"], "blobs": r["blobs"], "columns": list(w.columns), "placeholder": bool(w.columns) and w.columns[0] == "col1" and key not in columns}
     return {"idx": idx, "tables": {f"{k[0]}\x00{k[1]}": v for k, v in tables.items()}, "columns": {f"{k[0]}\x00{k[1]}": v for k, v in columns.items()},
             "schema": "".join(schema), "seconds": round(time.time() - t0, 1), "stats": stats}
 
@@ -1036,12 +1149,36 @@ def extract_dump_parallel(src: Path, out: Path, log: Log, workers: int, rows_per
     """Plain .sql dumps over PARALLEL_MIN_BYTES: byte ranges parsed by several processes, parts stitched in order."""
     from concurrent.futures import ProcessPoolExecutor
     t0 = time.time()
-    points = _split_points(src, workers)
-    ranges = [(points[i], points[i + 1]) for i in range(len(points) - 1) if points[i + 1] > points[i]]
-    switches = _db_switches(src)
-    log(f"[db] {src.name}: {human(src.stat().st_size)} parsed by {len(ranges)} workers" + (f"; {len(switches)} database switches" if switches else ""))
-    with ProcessPoolExecutor(max_workers=len(ranges)) as ex:
-        results = list(ex.map(_dump_worker, [(str(src), a, b, str(out), i, rows_per_file, _db_at(switches, a)) for i, (a, b) in enumerate(ranges)]))
+    size = src.stat().st_size
+    points = _split_points(src, workers, log)
+    bounds = [p[0] for p in points] + [size]
+    ranges = [(bounds[i], bounds[i + 1], points[i][1]) for i in range(len(points)) if bounds[i + 1] > bounds[i]]
+    if len(ranges) <= 1:
+        log(f"[db] {src.name}: no safe split point found (statements without ';'?); parsing sequentially")
+        return extract_dump(src, out, log, "mysql-dump", rows_per_file)
+    log(f"[db] {src.name}: {human(size)} parsed by {len(ranges)} workers at statement boundaries")
+    try:
+        with ProcessPoolExecutor(max_workers=len(ranges)) as ex:
+            results = list(ex.map(_dump_worker, [(str(src), a, b, str(out), i, rows_per_file, db) for i, (a, b, db) in enumerate(ranges)]))
+    except Exception as e:  # noqa: BLE001 - no worker processes here (no /dev/shm, a locked-down host, a worker killed by the OOM killer):
+        # the file is still read, by this process alone, from a clean export folder
+        log(f"[db] {src.name}: worker processes unavailable ({type(e).__name__}: {str(e)[:200]}); parsing sequentially instead")
+        for child in out.iterdir():
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                child.unlink(missing_ok=True)
+        return extract_dump(src, out, log, "mysql-dump", rows_per_file)
+    stats = {"inserts": 0, "rows": 0, "creates": 0, "skipped": 0, "malformed": 0, "notes": []}
+    for r in results:
+        for k in ("inserts", "rows", "creates", "skipped", "malformed"):
+            stats[k] += r["stats"].get(k, 0)
+        stats["notes"] += [f"worker {r['idx']}: {n}" for n in r["stats"].get("notes", [])][:5]
+    if stats["malformed"]:
+        log(f"[db] {src.name}: {stats['malformed']} row(s) not understood (skipped, logged): " + "; ".join(stats["notes"][:3]))
+    errors = [r["stats"]["error"] for r in results if r["stats"].get("error")]
+    if errors:
+        log(f"[db] {src.name}: {len(errors)} worker(s) stopped early: " + "; ".join(errors[:2]))
     results.sort(key=lambda r: r["idx"])
     # columns known anywhere (CREATE TABLE) win over placeholders
     columns: dict[str, list[str]] = {}
@@ -1080,11 +1217,31 @@ def extract_dump_parallel(src: Path, out: Path, log: Log, workers: int, rows_per
                 dest = ddir / f"{slug(table)}.part{i:03d}.csv"
                 pth.rename(dest)
                 final.append(dest.name)
+        # a part's spilled cells live in <table>.wNN.blobs/: gather them under <table>.blobs/
+        blobs = 0
+        for r in results:
+            t = r["tables"].get(k)
+            if t and t.get("blobs"):
+                blobs += t["blobs"]
+                src_dir = ddir / f"{slug(table)}.w{r['idx']:02d}.blobs"
+                dst_dir = ddir / f"{slug(table)}.blobs"
+                if src_dir.is_dir():
+                    dst_dir.mkdir(exist_ok=True)
+                    for bf in src_dir.iterdir():
+                        bf.rename(dst_dir / bf.name)
+                    try:
+                        src_dir.rmdir()
+                    except OSError:
+                        pass
         tables.append({"database": db, "table": table, "rows": rows, "columns": len(columns.get(k) or cols_used), "files": final,
-                       "bytes": sum((ddir / f).stat().st_size for f in final), "blobs": 0})
+                       "bytes": sum((ddir / f).stat().st_size for f in final), "blobs": blobs})
     (out / "schema.sql").write_text("".join(r["schema"] for r in results), "utf-8")
-    log(f"[db] {src.name}: done - {len(tables)} tables, {sum(t['rows'] for t in tables)} rows in {(time.time() - t0) / 60:.1f} min")
-    return {"tables": tables, "seconds": round(time.time() - t0, 1), "workers": len(ranges)}
+    log(f"[db] {src.name}: done - {len(tables)} tables, {sum(t['rows'] for t in tables)} rows in {(time.time() - t0) / 60:.1f} min "
+        f"({stats['inserts']} INSERTs, {stats['creates']} CREATE TABLEs, {stats['skipped']} other statements skipped, {stats['malformed']} malformed)")
+    r = {"tables": tables, "seconds": round(time.time() - t0, 1), "workers": len(ranges), "stats": stats}
+    if errors:
+        r["error"] = "partial: " + errors[0]
+    return r
 
 
 # --------------------------------------------------------------------------- live server (datadir)
@@ -1113,7 +1270,7 @@ def extract_datadir(datadir: Path, out: Path, work: Path, log: Log, custody=None
             w = TableWriter(out / slug(d), slug(name), cols, rows_per_file)
             err = ""
             try:
-                for row in db.stream(f"SELECT * FROM `{name}`", d):
+                for row in db.stream("SELECT * FROM `" + name.replace("`", "``") + "`", d):
                     w.write(row)
                     if w.rows % 250000 == 0:
                         log(f"[db] [{i}/{len(plan)}] {d}.{name}: {w.rows} rows so far ({human(sum(f.stat().st_size for f in w.files if f.exists()))})")

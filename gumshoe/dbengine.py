@@ -129,7 +129,9 @@ class PrivateMariaDB:
                     d.mkdir(parents=True, exist_ok=True)
             except OSError:
                 continue
-            r = subprocess.run(["mount", "-t", "overlay", "overlay", "-o", f"lowerdir={self.datadir},upperdir={up},workdir={wd}", str(self.data)],
+            def _ovl(x) -> str:                      # overlayfs option values: commas, colons and backslashes must be escaped
+                return str(x).replace("\\", "\\\\").replace(",", "\\,").replace(":", "\\:")
+            r = subprocess.run(["mount", "-t", "overlay", "overlay", "-o", f"lowerdir={_ovl(self.datadir)},upperdir={_ovl(up)},workdir={_ovl(wd)}", str(self.data)],
                                capture_output=True, text=True, errors="replace")
             if r.returncode == 0:
                 self.mode = "overlay"

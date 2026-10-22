@@ -39,7 +39,12 @@ from .integrity import utc_now
 
 Log = Callable[[str], None]
 csv.field_size_limit(min(sys.maxsize, 2**31 - 1))   # exported rows can carry cells far beyond csv's 128 KB default
-STRONG = ("email", "phone", "wallet", "pwhash", "iban", "card", "sshkey", "txid")
+STRONG = ("email", "phone", "wallet", "iban", "card", "sshkey")      # what merges account rows into one player
+# NOT glue (independent review, 2026-10-22): a password hash identifies a password - unsalted MD5/SHA1 tables have hundreds of
+# accounts sharing "123456" in groups of 2-50, under any promiscuity threshold - and a transaction id legitimately sits on
+# both the sender's and the receiver's rows. Both stay attached to players as linked identifiers, never as merge keys.
+LINK_ONLY = ("pwhash", "txid")
+PROMISCUOUS = {"email": 50, "phone": 20, "wallet": 50, "iban": 20, "card": 20, "sshkey": 50}   # rows an identifier may appear in and still be glue
 ACCOUNT_TABLE_RE = re.compile(r"(user|customer|client|member|account|profile|contact|person|people|employee|staff|admin|vendor|seller|buyer|"
                               r"merchant|subscriber|registr|login|auth|ftp|panel|wallet|kyc|partner|agent|affiliate|lead|order)", re.I)
 TX_TABLE_RE = re.compile(r"(trans|payment|pay|invoice|order|deposit|withdraw|transfer|txn|tx|ledger|balance|billing|charge|refund|"
@@ -650,6 +655,8 @@ CREATE TABLE IF NOT EXISTS account_rows(player_id INTEGER, source TEXT, db TEXT,
 CREATE TABLE IF NOT EXISTS money(id INTEGER PRIMARY KEY, source TEXT, db TEXT, table_ TEXT, row INTEGER, ts TEXT, amount REAL, currency TEXT, idents TEXT, player_id INTEGER);
 CREATE TABLE IF NOT EXISTS tables_(source TEXT, db TEXT, table_ TEXT, columns TEXT, types TEXT, account_table INTEGER, tx_table INTEGER, rows INTEGER, files TEXT);
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS glue(player_id INTEGER, type TEXT, norm TEXT, rows TEXT);
+CREATE INDEX IF NOT EXISTS ix_glue_player ON glue(player_id);
 CREATE INDEX IF NOT EXISTS ix_ent_norm ON entities(norm);
 CREATE INDEX IF NOT EXISTS ix_ent_player ON entities(player_id);
 CREATE INDEX IF NOT EXISTS ix_links_a ON links(a); CREATE INDEX IF NOT EXISTS ix_links_b ON links(b);
@@ -768,7 +775,7 @@ def derive_players(con: sqlite3.Connection, log: Log, shared_ip_threshold: int =
     e-mail like noreply@..., a default password hash) is demoted: it links nothing."""
     con.execute("DELETE FROM players"); con.execute("DELETE FROM player_entities"); con.execute("UPDATE entities SET player_id=NULL")
     con.execute("UPDATE account_rows SET player_id=NULL"); con.execute("UPDATE money SET player_id=NULL")
-    rows = con.execute("SELECT rowid, idents, label, ts, db, table_ FROM account_rows LIMIT ?", (MAX_ACCOUNT_ROWS,)).fetchall()
+    rows = con.execute("SELECT rowid, idents, label, ts, db, table_, row FROM account_rows LIMIT ?", (MAX_ACCOUNT_ROWS,)).fetchall()
     n_rows = len(rows)
     if n_rows >= MAX_ACCOUNT_ROWS:
         log(f"[players] account rows capped at {MAX_ACCOUNT_ROWS} (memory bound)")
@@ -781,14 +788,17 @@ def derive_players(con: sqlite3.Connection, log: Log, shared_ip_threshold: int =
         for k in set(ks):
             if k[0] in STRONG:
                 occ[k] += 1
-    promiscuous = {k for k, c in occ.items() if c > 50}
+    promiscuous = {k for k, c in occ.items() if c > PROMISCUOUS.get(k[0], 50)}
     del occ
     uf = _UF()
     key_root: dict[tuple[str, str], int] = {}
+    glue: dict[tuple[str, str], list[int]] = {}          # identifier -> the account rows it joined (the merge is auditable)
     for i, ks in enumerate(row_keys):
         for k in ks:
             if k[0] in STRONG and k not in promiscuous:
                 if k in key_root:
+                    if uf.find(key_root[k]) != uf.find(i):
+                        glue.setdefault(k, [key_root[k]]).append(i)
                     uf.union(key_root[k], i)
                 else:
                     key_root[k] = i
@@ -812,7 +822,7 @@ def derive_players(con: sqlite3.Connection, log: Log, shared_ip_threshold: int =
         sources: Counter = Counter()
         first = last = None
         for i in members:
-            rid, idents, label, ts, db, table = rows[i]
+            rid, idents, label, ts, db, table, _rowno = rows[i]
             for k in row_keys[i]:
                 keys[k] += 1
             if label:
@@ -829,7 +839,8 @@ def derive_players(con: sqlite3.Connection, log: Log, shared_ip_threshold: int =
             eid = ent_ids.get(k)
             if eid is None:
                 continue
-            role = "strong" if k[0] in STRONG and k not in promiscuous else ("attribute" if k[0] in ("name", "username", "handle", "domain", "url") else "weak")
+            role = ("strong" if k[0] in STRONG and k not in promiscuous else "linked" if k[0] in LINK_ONLY
+                    else "attribute" if k[0] in ("name", "username", "handle", "domain", "url") else "weak")
             pe_rows.append((pid, eid, role))
             if role == "strong":
                 strong_updates.append((pid, eid))
@@ -840,6 +851,11 @@ def derive_players(con: sqlite3.Connection, log: Log, shared_ip_threshold: int =
     con.executemany("INSERT INTO players(id, label, kind, score, first_seen, last_seen, n_entities, n_links, sources, summary) VALUES (?,?,?,?,?,?,?,?,?,?)", players_rows)
     con.executemany("INSERT OR IGNORE INTO player_entities(player_id, entity_id, role) VALUES (?,?,?)", pe_rows)
     con.executemany("UPDATE account_rows SET player_id=? WHERE rowid=?", row_updates)
+    con.execute("DELETE FROM glue")
+    row_pid = dict((rid, pid) for pid, rid in row_updates)
+    con.executemany("INSERT INTO glue(player_id, type, norm, rows) VALUES (?,?,?,?)",
+                    ((row_pid.get(rows[idxs[0]][0]), k[0], k[1], json.dumps([f"{rows[i][4]}.{rows[i][5]}:{rows[i][6]}" for i in idxs[:50]]))
+                     for k, idxs in glue.items()))
     con.executemany("UPDATE entities SET player_id=? WHERE id=? AND player_id IS NULL", strong_updates)
     del rows, row_keys, groups, ent_ids, players_rows, pe_rows, row_updates, strong_updates
     con.commit()
@@ -1111,7 +1127,8 @@ def player_detail(con: sqlite3.Connection, pid: int) -> dict[str, Any]:
     money = [dict(r) for r in con.execute("SELECT source, db, table_, row, ts, amount, currency, idents FROM money WHERE player_id=? ORDER BY ts", (pid,))]
     msum = [dict(r) for r in con.execute("SELECT currency, COUNT(*) AS n, SUM(amount) AS total, SUM(CASE WHEN amount>0 THEN amount ELSE 0 END) AS inflow, "
                                            "SUM(CASE WHEN amount<0 THEN amount ELSE 0 END) AS outflow, MIN(ts) AS first, MAX(ts) AS last FROM money WHERE player_id=? GROUP BY currency", (pid,))]
-    return {"player": dict(p), "entities": ents, "activity": act, "account_rows": rows, "money": money, "money_summary": msum}
+    glue = [dict(r) for r in con.execute("SELECT type, norm, rows FROM glue WHERE player_id=?", (pid,))]
+    return {"player": dict(p), "entities": ents, "activity": act, "account_rows": rows, "money": money, "money_summary": msum, "glue": glue}
 
 
 def entity_lookup(con: sqlite3.Connection, text: str, limit: int = 50) -> list[dict[str, Any]]:
@@ -1185,6 +1202,11 @@ def dossier_text(con: sqlite3.Connection, pid: int) -> str:
                 lines.append(f"- {e['type']}: {e['value']} (x{e['count']}, {e['first_seen'] or '?'} .. {e['last_seen'] or '?'}; {where})" +
                              (f" - shared with {e['shared_with']} other player(s)" if e["shared_with"] else ""))
             lines.append("")
+    if d.get("glue"):
+        lines.append("## Merged over (why these account rows are one player)")
+        for g in d["glue"]:
+            lines.append(f"- {g['type']} {g['norm']} joins rows " + ", ".join(json.loads(g["rows"] or "[]")[:8]))
+        lines.append("")
     if d["money_summary"]:
         lines.append("## Money")
         for m in d["money_summary"]:

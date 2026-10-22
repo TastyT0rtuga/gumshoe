@@ -824,9 +824,11 @@ class Intake:
         self._save(case)
 
         # verify
-        from .mount import check_readonly
+        from .mount import check_readonly, holder_of
         from .integrity import utc_now, hash_file_multi
         ro = check_readonly(case.mount_root, case.mode)
+        if image_path:
+            ro["image_holder"] = holder_of(image_path)   # how the drive/share holding the image file is mounted (usually rw: WSL's choice, never written by Gumshoe)
         case.meta["readonly_check"] = {**ro, "at": utc_now()}
         case.save_meta()
         case.custody.append("readonly_check", ro)
@@ -1050,5 +1052,7 @@ def remount(case: Case, log: Log = print, replace_mount: bool = False) -> dict[s
                 log(f"[remount] second volume skipped: {v['image']} is not reachable" + (f" ({vnote})" if vnote else ""))
                 continue
             mount_image(vimg, log, part=v.get("part") or "", lv=v.get("lv") or "", at=v["mountpoint"])
-    case.custody.append("remounted", {"images": rec.get("images"), "volumes": [v.get("mountpoint") for v in rec.get("volumes", []) if v.get("mounted")]})
+    from .mount import holder_of
+    case.custody.append("remounted", {"images": rec.get("images"), "volumes": [v.get("mountpoint") for v in rec.get("volumes", []) if v.get("mounted")],
+                                      "image_holder": holder_of(root_img)})
     return rec
