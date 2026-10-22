@@ -166,7 +166,15 @@ tables over 1,000,000 rows split into `.partNNN.csv`, binary values too big for 
 
 How: a data directory is never copied or written - a private MariaDB (or the bundled MySQL 8.0 engine for
 8.0 layouts) runs over an overlay, so crash recovery of a live-imaged server happens in the work folder,
-and every table is streamed out. Dumps are parsed straight to CSV (several processes on big plain files).
+and every table is streamed out. Dumps are read as a byte stream straight to CSV (several processes on big
+plain files): a 12 GB dump, a table kept on one multi-GB line or one INSERT with millions of rows all run in a
+few hundred MB of memory. Dialects: mysqldump, phpMyAdmin, Navicat/HeidiSQL/SQLyog/Workbench, PostgreSQL
+`--inserts`, T-SQL scripts (`[dbo].[t]`, `N'...'`, `GO`), doubled or backslash-escaped quotes, statements with
+or without `;`. A cell longer than Excel's limit (32,767 characters) is saved as `<table>.blobs\rowN.column.txt`
+with a pointer in the cell; binary cells likewise. Each source gets its own folder named `<parent>-<file>-<hash>`
+(`db-dump_sw.sql-341566`), so dumps that share a long path never overwrite each other. The extraction log says
+what the reader recognised (INSERTs, CREATE TABLEs, other statements skipped, malformed); if a `.sql` yields 0
+tables, send its first lines (`head -c 2000`) so the dialect can be added.
 Search every exported table from the tab (name, e-mail, phone, IP ...), case-insensitive, any script.
 
 ### What is it built on: the fingerprint

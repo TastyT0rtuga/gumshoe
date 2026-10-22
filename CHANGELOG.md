@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **Databases to CSV: fixes for the 12 GB dump that "gave nothing back".** (1) Export folders were named after the
+  source's path truncated to 60 characters, so nine dumps under one long case path shared one folder and each
+  extraction wiped the previous one - the 12 GB dump's tables were deleted by the 368-byte migration extracted
+  after it, and Players/Databases showed 0. Folders are now `<parent>-<file>-<hash of the path>` (`db-dump_sw.sql-341566`),
+  never shared, never overwritten by another source; the old shared folder is removed on re-extraction.
+  (2) The MySQL dump reader streams bytes instead of lines: no line, statement or table has to fit in memory (a
+  table kept on one 3 GB line, one INSERT with millions of rows, a 60 MB cell: 220 MB peak), identical rows to the
+  old reader, parallel byte-range workers kept (and told which database is in effect at their start).
+  (3) Dialects: phpMyAdmin rows on separate lines, Navicat/HeidiSQL/SQLyog, lowercase, `INSERT ... ON DUPLICATE KEY`,
+  `REPLACE`, doubled quotes (`'it''s'`) as well as backslash escapes, statements without `;`, T-SQL scripts
+  (`INSERT [dbo].[t]`, `N'...'`, `GO`), bit literals, `/*! ... */;` conditional statements, triggers/DELIMITER
+  blocks; detection reads the first MB and takes any `.sql` as a dump. (4) A cell longer than Excel's 32,767
+  characters is written to `<table>.blobs/rowN.column.txt` with a pointer in the cell. (5) The log says what the
+  reader saw (INSERTs, CREATE TABLEs, skipped, malformed) and, when nothing was recognised, asks for the file head.
+- Findings tab: the severity pills default to what the case has (a case with only info findings no longer opens
+  on "0 of 7 findings shown"), and an empty result says which severities the pills are hiding.
 - Remount after a reboot works for evidence on a share or a mapped drive: the recorded image paths (Windows,
   UNC or distro form) are resolved through winpath again, so `\\server\share\...` is mounted inside the distro
   (drvfs) before the image is looked for; the error names the path that was tried and why the share could not

@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from collections import Counter
+
 import pandas as pd
 import streamlit as st
 
@@ -58,7 +60,9 @@ def render_findings_tab(case, findings: list[dict], show_preview, cases_root: Pa
 
     # ---- filters
     c1, c2, c3 = st.columns([2.2, 2, 3])
-    sev = c1.pills("Severity", list(reversed(SEVERITIES)), selection_mode="multi", default=["critical", "high", "medium"], key="fx_sev")
+    present = {f["severity"] for f in findings}
+    default_sev = [x for x in ("critical", "high", "medium") if x in present] or [x for x in reversed(SEVERITIES) if x in present]
+    sev = c1.pills("Severity", list(reversed(SEVERITIES)), selection_mode="multi", default=default_sev, key="fx_sev")
     srcs = c2.multiselect("Source", sorted({f["source"] for f in findings}), key="fx_src")
     text = c3.text_input("Search (title, path, description, excerpt; any script)", key="fx_text")
     c4, c5, c6, c7 = st.columns([2, 2, 1.6, 1.6])
@@ -83,7 +87,9 @@ def render_findings_tab(case, findings: list[dict], show_preview, cases_root: Pa
         rows.sort(key=lambda f: (f.get("path") or "~", f.get("line") or 0))
     st.caption(f"{len(rows)} of {len(findings)} findings shown · {n_flag} flagged · {n_dis} dismissed · tick rows to act on them")
     if not rows:
-        st.info("Nothing matches these filters.")
+        hidden = Counter(f["severity"] for f in findings if f["severity"] not in sev)
+        st.info("Nothing matches these filters." + (" The severity pills hide " + ", ".join(f"{n} {k}" for k, n in hidden.items()) +
+                " finding(s): tick those severities above." if hidden else ""))
         return
 
     # ---- the table (tick rows to select)

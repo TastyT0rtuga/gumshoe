@@ -43,6 +43,7 @@ csv.field_size_limit(min(sys.maxsize, 2**31 - 1))   # exported rows can carry ce
 
 Log = Callable[[str], None]
 ROWS_PER_FILE = 1_000_000
+CELL_MAX = 32_000                  # Excel holds 32,767 characters per cell; longer text goes to a file beside the table
 BLOB_INLINE_MAX = 2048            # bytes of undecodable binary kept in the cell as hex; bigger -> a file
 _CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 SKIP_TOP = {"proc", "sys", "dev", "run", "boot", "lost+found", "snap"}
@@ -50,9 +51,31 @@ SKIP_SUB = {"usr/lib", "usr/share", "usr/src", "usr/include", "var/cache", "var/
 DUMP_EXT = (".sql", ".sql.gz", ".sql.xz", ".sql.bz2", ".sql.zip", ".dump", ".dump.gz", ".mysql", ".psql")
 
 
-def slug(s: str) -> str:
-    s = re.sub(r"[^A-Za-z0-9._-]+", "-", s).strip("-._")
-    return s[:60] or "db"
+def slug(s: str, limit: int = 80) -> str:
+    """A safe file/folder name. A name longer than the limit keeps its start plus a hash of the whole, so two long
+    names that share a prefix never collide."""
+    t = re.sub(r"[^A-Za-z0-9._-]+", "-", s).strip("-._")
+    if len(t) > limit:
+        import hashlib
+        t = t[:limit - 7].rstrip("-._") + "-" + hashlib.sha1(s.encode("utf-8", "replace")).hexdigest()[:6]
+    return t or "db"
+
+
+def export_name(source: dict[str, Any]) -> str:
+    """The folder name of a source's export: its file name under its parent folder (db-dump_sw.sql) plus a short hash of
+    the full path, so nine dumps under one long case path get nine folders (build f truncated the path and they
+    overwrote each other)."""
+    import hashlib
+    rel = (source.get("rel") or Path(source["path"]).name).strip("/")
+    parts = [x for x in rel.split("/") if x]
+    base = "-".join(parts[-2:]) if len(parts) > 1 else (parts[-1] if parts else "db")
+    return slug(base, 48) + "-" + hashlib.sha1(rel.encode("utf-8", "replace")).hexdigest()[:6]
+
+
+def legacy_export_name(source: dict[str, Any]) -> str:
+    rel = (source.get("rel") or Path(source["path"]).name).strip("/").replace("/", "-")
+    t = re.sub(r"[^A-Za-z0-9._-]+", "-", rel).strip("-._")
+    return t[:60] or "db"
 
 
 def human(n: float) -> str:
@@ -82,15 +105,19 @@ def _access_header(p: Path) -> bool:
 
 
 def _dump_kind(p: Path) -> Optional[str]:
-    """'mysql-dump' | 'pg-dump' | None by looking at the first lines (through compression)."""
+    """'mysql-dump' | 'pg-dump' | None by looking at the first MB (through compression). A .sql file that shows none of
+    the usual markers in its first MB is still taken as a MySQL dump (the reader reports what it found)."""
     try:
         with _open_text(p) as f:
-            head = f.read(8192)
+            head = f.read(2**20)
     except Exception:  # noqa: BLE001
         return None
-    if "PostgreSQL database dump" in head or re.search(r"^COPY .* FROM stdin;", head, re.M):
+    if "PostgreSQL database dump" in head or re.search(r"^COPY .* FROM stdin;", head, re.M) or re.search(r"^SET statement_timeout", head, re.M):
         return "pg-dump"
-    if re.search(r"(MySQL dump|MariaDB dump|phpMyAdmin SQL Dump|CREATE TABLE|INSERT INTO|DROP TABLE IF EXISTS)", head, re.I):
+    if re.search(r"(MySQL dump|MariaDB dump|phpMyAdmin SQL Dump|CREATE TABLE|INSERT INTO|REPLACE INTO|DROP TABLE|CREATE DATABASE|LOCK TABLES|SET NAMES|"
+                 r"SET SQL_MODE|/\*!\d{5}|Navicat|HeidiSQL|SQLyog|Sequel|Adminer|MySQL Workbench|DBeaver|mysqldump)", head, re.I):
+        return "mysql-dump"
+    if p.name.lower().endswith(".sql") or ".sql." in p.name.lower():
         return "mysql-dump"
     return None
 
@@ -239,15 +266,30 @@ class TableWriter:
         self.rows += 1
 
     def write_text_row(self, row) -> None:
-        """Fast path for rows that hold only str or None (the dump parser's output)."""
+        """Fast path for rows that hold only str or None (the dump parser's output). A cell longer than Excel can hold
+        (CELL_MAX characters) goes to <table>.blobs/rowN.column.txt and the cell says so."""
         if self._w is None or self._in_file >= self.rows_per_file:
             if self._f is not None:
                 self._f.close()
             self._open()
             self._rename_first()
-        self._w.writerow(["" if v is None else v for v in row])
+        cells = ["" if v is None else v for v in row]
+        for i, v in enumerate(cells):
+            if len(v) > CELL_MAX:
+                cells[i] = self._spill_text(v, i)
+        self._w.writerow(cells)
         self._in_file += 1
         self.rows += 1
+
+    def _spill_text(self, v: str, col: int) -> str:
+        self.blobs += 1
+        bd = self.out_dir / f"{self.table}.blobs"
+        bd.mkdir(exist_ok=True)
+        colname = self.columns[col] if col < len(self.columns) else f"c{col}"
+        fn = bd / f"row{self.rows + 1}.{slug(colname)}.txt"
+        with open(fn, "w", encoding="utf-8", errors="replace") as f:
+            f.write(v)
+        return f"<text {len(v)} chars: {fn.parent.name}/{fn.name}>"
 
     def _cell(self, v, col: int):
         if v is None:
@@ -303,10 +345,10 @@ def _open_text(p: Path):
     return open(p, "r", encoding="utf-8", errors="replace", newline="")
 
 
-_SQ = r"'[^'\\]*(?:\\.[^'\\]*)*'"          # single-quoted string, backslash escapes (unrolled loop: fast)
-_DQ = r'"[^"\\]*(?:\\.[^"\\]*)*"'
+_SQ = r"'[^'\\]*(?:(?:\\.|'')[^'\\]*)*'"    # single-quoted string: backslash escapes (mysqldump) and doubled quotes (SQL standard); unrolled loop
+_DQ = r'"[^"\\]*(?:(?:\\.|"")[^"\\]*)*"'
 _ROW_RE = re.compile(r"\((?:" + _SQ + "|" + _DQ + r"|[^()'\"]+)*\)", re.S)
-_FIELD_RE = re.compile(r"\s*" + _SQ + r"|\s*" + _DQ + r"|\s*_binary\s*" + _SQ + r"|\s*[xXbB]'[0-9a-fA-F]*'|[^,'\"]+", re.S)
+_FIELD_RE = re.compile(r"\s*" + _SQ + r"|\s*" + _DQ + r"|\s*_binary\s*" + _SQ + r"|\s*[nN]" + _SQ + r"|\s*[xXbB]'[0-9a-fA-F]*'|[^,'\"]+", re.S)
 _UNESC = {"0": "\x00", "n": "\n", "r": "\r", "t": "\t", "b": "\b", "Z": "\x1a", "\\": "\\", "'": "'", '"': '"', "%": "\\%", "_": "\\_"}
 _BS_RE = re.compile(r"\\(.)", re.S)
 _HEX_RE = re.compile(r"^(?:0[xX]([0-9a-fA-F]+)|[xX]'([0-9a-fA-F]*)')$")
@@ -333,14 +375,19 @@ def _field(t: str):
             return ""
     c = t[0]
     if c == "'":
-        return _unescape(t[1:-1]).replace("''", "'") if "''" in t else _unescape(t[1:-1])
+        return _unescape(t[1:-1].replace("''", "'")) if "''" in t else _unescape(t[1:-1])
     if c == '"':
-        return _unescape(t[1:-1]).replace('""', '"') if '""' in t else _unescape(t[1:-1])
+        return _unescape(t[1:-1].replace('""', '"')) if '""' in t else _unescape(t[1:-1])
     if c == "_":                       # _binary 'x'
         return _unescape(t[t.index("'") + 1:-1])
+    if (c == "N" or c == "n") and len(t) > 1 and t[1] == "'":      # N'unicode' (T-SQL)
+        return _unescape(t[2:-1].replace("''", "'")) if "''" in t else _unescape(t[2:-1])
     t = t.strip()
     if t == "NULL" or t == "null":
         return None
+    if (c == "b" or c == "B") and len(t) > 2 and t[1] == "'" and t[-1] == "'":      # bit literal b'101'
+        bits = t[2:-1]
+        return str(int(bits, 2)) if bits and set(bits) <= {"0", "1"} else t
     if t and t[0] in "0xX" and len(t) > 2 and (t[1] in "xX'" or t[0] in "xX"):
         m = _HEX_RE.match(t)
         if m:
@@ -478,41 +525,361 @@ def _pg_unescape(s: str) -> str:
     return _BS_RE.sub(lambda m: {"n": "\n", "t": "\t", "r": "\r", "\\": "\\", "b": "\b", "f": "\f", "v": "\v"}.get(m.group(1), m.group(1)), s)
 
 
+# --------------------------------------------------------------------------- streaming MySQL dump reader
+# Bytes in, rows out. Nothing has to fit in memory: not a line, not a statement, not a table - a dump that puts a
+# whole table on one 3 GB line (some tools do) or in one INSERT with millions of rows streams through a rolling
+# buffer of a few MB. Rows are recognised by a regex that only ever matches a complete row with balanced quotes,
+# so a row cut by a buffer boundary is simply retried once more bytes are in.
+STREAM_CHUNK = 4 * 2**20
+_INSERT_HEAD_RE = re.compile(r"(?:INSERT|REPLACE)\s+(?:LOW_PRIORITY\s+|DELAYED\s+|IGNORE\s+)*(?:INTO\s+)?"
+                             r"(?:[`\"\[]?(?P<db>[^`\"\[\].\s(]+)[`\"\]]?\.)?[`\"\[]?(?P<t>[^`\"\[\]\s(]+)[`\"\]]?\s*"
+                             r"(?:\((?P<cols>[^)]*)\))?\s*VALUES?\s*", re.I | re.S)       # MySQL/MariaDB, PostgreSQL --inserts, T-SQL ([dbo].[t], no INTO)
+_CREATE_HEAD_RE = re.compile(r"CREATE\s+(?:TEMPORARY\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[`\"]?(?:[`\"]?(?P<db>[^`\".\s(]+)[`\"]?\.)?[`\"]?(?P<t>[^`\"\s(]+)[`\"]?", re.I)
+_USE_HEAD_RE = re.compile(r"USE\s+[`\"]?([^`\";\s]+)", re.I)
+_CREATEDB_HEAD_RE = re.compile(r"CREATE\s+DATABASE\s+(?:IF\s+NOT\s+EXISTS\s+)?[`\"]?([^`\";\s]+)", re.I)
+_TOK_RE = re.compile(_SQ + "|" + _DQ + r"|;|\n|[^'\";\n]+", re.S)   # statement text up to its ';' (quote-aware), newline by newline
+_KEYWORD_AT_LINE_RE = re.compile(r"[ \t\r]*(?:INSERT|REPLACE|CREATE|DROP|ALTER|GO\b|USE\b|LOCK\b|UNLOCK|SET\b|COMMIT|BEGIN|START\b|DELIMITER|TRUNCATE|GRANT|FLUSH|--|#|/\*)", re.I)
+_SEP_RE = re.compile(r"\s*(,|;)\s*", re.S)
+_WS_RE = re.compile(r"\s+", re.S)
+_HEAD_WINDOW = 256 * 1024          # a statement head (INSERT INTO ... VALUES) is read within this much text
+
+
+class _TextStream:
+    """A rolling text buffer over an iterator of byte chunks (UTF-8, multi-byte characters split across chunks are
+    handled by the incremental decoder)."""
+
+    __slots__ = ("_it", "_dec", "buf", "pos", "eof", "consumed")
+
+    def __init__(self, byte_chunks):
+        import codecs
+        self._it = iter(byte_chunks)
+        self._dec = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        self.buf = ""
+        self.pos = 0
+        self.eof = False
+        self.consumed = 0                  # bytes taken from the source (for progress)
+
+    def fill(self, rebase: bool = True) -> bool:
+        """Append the next chunk (dropping what is behind pos first unless rebase=False); False at end of input."""
+        if self.eof:
+            return False
+        if rebase and self.pos:
+            self.buf = self.buf[self.pos:]
+            self.pos = 0
+        try:
+            b = next(self._it)
+        except StopIteration:
+            self.eof = True
+            tail = self._dec.decode(b"", final=True)
+            if tail:
+                self.buf += tail
+                return True
+            return False
+        self.consumed += len(b)
+        self.buf += self._dec.decode(b)
+        return True
+
+    def ensure(self, n: int) -> None:
+        """At least n characters after pos, or everything there is."""
+        while len(self.buf) - self.pos < n and self.fill():
+            pass
+
+
+def _byte_chunks(src: Path, start: int = 0, end: Optional[int] = None, chunk: int = STREAM_CHUNK):
+    """Chunks of a plain file between byte offsets (the whole file by default)."""
+    with open(src, "rb") as f:
+        f.seek(start)
+        left = (end - start) if end is not None else None
+        while left is None or left > 0:
+            b = f.read(chunk if left is None else min(chunk, left))
+            if not b:
+                break
+            if left is not None:
+                left -= len(b)
+            yield b
+
+
+def _compressed_chunks(src: Path, chunk: int = STREAM_CHUNK):
+    """Chunks of a gz / xz / bz2 / zip dump, decompressed on the fly."""
+    n = src.name.lower()
+    if n.endswith(".gz"):
+        f = gzip.open(src, "rb")
+    elif n.endswith(".xz"):
+        f = lzma.open(src, "rb")
+    elif n.endswith(".bz2"):
+        f = bz2.open(src, "rb")
+    elif n.endswith(".zip"):
+        z = zipfile.ZipFile(src)
+        members = [i for i in z.infolist() if not i.is_dir()]
+        members.sort(key=lambda i: -i.file_size)
+        f = z.open(members[0])
+    else:
+        f = open(src, "rb")
+    with f:
+        while True:
+            b = f.read(chunk)
+            if not b:
+                break
+            yield b
+
+
+def parse_mysql_dump(chunks, writer_for, on_create=None, on_db=None, progress=None, initial_db: str = "dump") -> dict[str, int]:
+    """Stream a MySQL/MariaDB dump: INSERT/REPLACE rows go to writer_for(db, table, columns-or-None).write_text_row;
+    CREATE TABLE statements go to on_create(db, table, statement_text); USE / CREATE DATABASE switch the database.
+    Returns counters. Malformed input never stops the stream: the parser resyncs at the next statement."""
+    st = _TextStream(chunks)
+    cur_db = initial_db or "dump"
+    stats = {"inserts": 0, "rows": 0, "creates": 0, "skipped": 0, "malformed": 0}
+    rows_since_progress = 0
+
+    def skip_statement() -> None:
+        # consume up to and including the next ';' outside quotes, or up to (not including) a line that starts with a
+        # statement keyword (scripts without ';', T-SQL GO batches); tolerant of buffer boundaries
+        while True:
+            m = _TOK_RE.match(st.buf, st.pos)
+            if m is None:
+                # an unterminated quote at the end of the buffer (or a lone quote): more data, or give up on the quote
+                if st.fill():
+                    continue
+                st.pos = len(st.buf)
+                return
+            tok = m.group(0)
+            if tok == "\n":
+                st.ensure(24)
+                if _KEYWORD_AT_LINE_RE.match(st.buf, m.end()):
+                    st.pos = m.end()
+                    return
+            st.pos = m.end()
+            if tok == ";":
+                return
+            if st.pos >= len(st.buf) and not st.fill():
+                return
+
+    def statement_text() -> str:
+        # the text of the statement at pos up to its ';' (schema statements: small; anything over 8 MB is dropped)
+        start = st.pos
+        while True:
+            m = _TOK_RE.match(st.buf, st.pos)
+            if m is None:
+                if st.fill(rebase=False):
+                    continue
+                st.pos = len(st.buf)
+                return st.buf[start:]
+            tok = m.group(0)
+            if tok == "\n":
+                if len(st.buf) - m.end() < 24:
+                    st.fill(rebase=False)
+                if _KEYWORD_AT_LINE_RE.match(st.buf, m.end()) and st.pos > start:
+                    st.pos = m.end()
+                    return st.buf[start:st.pos]
+            st.pos = m.end()
+            if tok == ";":
+                return st.buf[start:st.pos]
+            if st.pos - start > 8 * 2**20:
+                skip_statement()
+                return ""
+            if st.pos >= len(st.buf) and not st.fill(rebase=False):
+                return st.buf[start:]
+
+    while True:
+        # ---- skip whitespace and comments between statements
+        st.ensure(16)
+        if st.pos >= len(st.buf):
+            break
+        c = st.buf[st.pos]
+        if c in " \t\r\n":
+            m = _WS_RE.match(st.buf, st.pos)
+            st.pos = m.end()
+            continue
+        two = st.buf[st.pos:st.pos + 2]
+        if two == "--" or c == "#":
+            nl = st.buf.find("\n", st.pos)
+            while nl < 0:
+                if not st.fill():
+                    st.pos = len(st.buf)
+                    break
+                nl = st.buf.find("\n", st.pos)
+            if nl >= 0:
+                st.pos = nl + 1
+            continue
+        if two == "/*" and not st.buf.startswith("/*!", st.pos):
+            end = st.buf.find("*/", st.pos)
+            while end < 0:
+                if not st.fill():
+                    st.pos = len(st.buf)
+                    break
+                end = st.buf.find("*/", st.pos)
+            if end >= 0:
+                st.pos = end + 2
+            continue
+        # ---- a statement: look at its head
+        st.ensure(_HEAD_WINDOW)
+        head12 = st.buf[st.pos:st.pos + 12].upper()
+        if head12.startswith("GO") and (len(head12) == 2 or head12[2] in "\r\n \t"):      # T-SQL batch separator
+            nl = st.buf.find("\n", st.pos)
+            st.pos = nl + 1 if nl >= 0 else len(st.buf)
+            continue
+        if head12.startswith("INSERT") or head12.startswith("REPLACE"):
+            m = _INSERT_HEAD_RE.match(st.buf, st.pos)
+            if m is None:
+                stats["malformed"] += 1
+                skip_statement()
+                continue
+            db = m.group("db") or cur_db
+            table = m.group("t")
+            cols = [x.strip().strip('`"') for x in (m.group("cols") or "").split(",") if x.strip()] or None
+            st.pos = m.end()
+            w = writer_for(db, table, cols)
+            wr = w.write_text_row
+            findall = _FIELD_RE.findall
+            fld = _field
+            stats["inserts"] += 1
+            while True:
+                rm = _ROW_RE.match(st.buf, st.pos)
+                if rm is None:
+                    if st.pos < len(st.buf) and st.buf[st.pos] == ";":     # INSERT ... VALUES; with no rows, or trailing ;
+                        st.pos += 1
+                        break
+                    if st.fill():
+                        continue
+                    stats["malformed"] += 1          # ran out of input inside a row
+                    st.pos = len(st.buf)
+                    break
+                row = [fld(t) for t in findall(st.buf, rm.start() + 1, rm.end() - 1) if not t.isspace()]   # no copies of the row text
+                if not w.columns:
+                    w.columns = [f"col{i + 1}" for i in range(len(row))]
+                wr(row)
+                stats["rows"] += 1
+                rows_since_progress += 1
+                st.pos = rm.end()
+                # the separator: ',' -> next row; ';' -> end; buffer end -> more data
+                while True:
+                    sm = _SEP_RE.match(st.buf, st.pos)
+                    if sm is not None:
+                        st.pos = sm.end()
+                        sep = sm.group(1)
+                        break
+                    if st.pos >= len(st.buf) or st.buf[st.pos:].isspace():
+                        if st.fill():
+                            continue
+                        sep = ";"
+                        st.pos = len(st.buf)
+                        break
+                    sep = "?"                        # something else: ON DUPLICATE KEY UPDATE ..., or junk
+                    break
+                if sep == ";":
+                    break
+                if sep == "?":                       # ON DUPLICATE KEY UPDATE ..., a GO line, the next statement: the main loop takes it
+                    break
+                if rows_since_progress >= 50_000 and progress is not None:
+                    rows_since_progress = 0
+                    progress(st.consumed)
+            if progress is not None and rows_since_progress:
+                rows_since_progress = 0
+                progress(st.consumed)
+        elif head12.startswith("CREATE TABLE") or head12.startswith("CREATE TEMP"):
+            text = statement_text()
+            m = _CREATE_HEAD_RE.match(text)
+            if m and on_create is not None:
+                on_create(m.group("db") or cur_db, m.group("t"), text)
+            stats["creates"] += 1
+        elif head12.startswith("USE"):
+            text = statement_text()
+            m = _USE_HEAD_RE.match(text)
+            if m:
+                cur_db = m.group(1)
+                if on_db is not None:
+                    on_db(cur_db)
+        elif head12.startswith("CREATE DATAB"):
+            text = statement_text()
+            m = _CREATEDB_HEAD_RE.match(text)
+            if m:
+                cur_db = m.group(1)
+                if on_db is not None:
+                    on_db(cur_db)
+        else:
+            stats["skipped"] += 1
+            skip_statement()
+    return stats
+
+
+def _chunk_source(src: Path, chunk: int = STREAM_CHUNK):
+    """(byte-chunk generator, function giving the position in the file on disk) for a plain or compressed dump."""
+    n = src.name.lower()
+    raw = open(src, "rb")
+    if n.endswith(".gz"):
+        f = gzip.GzipFile(fileobj=raw)
+    elif n.endswith(".xz"):
+        f = lzma.LZMAFile(raw)
+    elif n.endswith(".bz2"):
+        f = bz2.BZ2File(raw)
+    elif n.endswith(".zip"):
+        z = zipfile.ZipFile(raw)
+        members = [i for i in z.infolist() if not i.is_dir()]
+        members.sort(key=lambda i: -i.file_size)
+        f = z.open(members[0])
+    else:
+        f = raw
+
+    def gen():
+        with raw:
+            try:
+                while True:
+                    b = f.read(chunk)
+                    if not b:
+                        break
+                    yield b
+            finally:
+                if f is not raw:
+                    f.close()
+
+    def pos():
+        try:
+            return raw.tell()
+        except Exception:  # noqa: BLE001
+            return 0
+    return gen(), pos
+
+
 def extract_dump(src: Path, out: Path, log: Log, kind: str = "mysql-dump", rows_per_file: int = ROWS_PER_FILE) -> dict[str, Any]:
-    """Parse a SQL dump straight into CSV files (one per table, under <out>/<database>/)."""
+    """Parse a SQL dump straight into CSV files (one per table, under <out>/<database>/). Streams: no line, statement or
+    table has to fit in memory."""
     size = src.stat().st_size
     schema_lines: list[str] = []
     writers: dict[tuple[str, str], TableWriter] = {}
     columns: dict[tuple[str, str], list[str]] = {}
     tables: list[dict[str, Any]] = []
-    cur_db = "dump"
     t0 = time.time()
     last_pct = -1
-    raw = None
 
-    def progress():
+    def writer_for(db: str, table: str, ncols_hint: Optional[list[str]]) -> TableWriter:
+        key = (db, table)
+        w = writers.get(key)
+        if w is None:
+            cols = ncols_hint or columns.get(key) or []
+            w = writers[key] = TableWriter(out / slug(db), slug(table), cols, rows_per_file)
+        return w
+
+    def on_create(db: str, table: str, text: str) -> None:
+        key = (db, table)
+        columns[key] = columns_from_create(text)
+        if key in writers and not writers[key].columns:
+            writers[key].columns = columns[key]
+        schema_lines.append(text.strip() + "\n\n")
+
+    def progress_at(pos: int) -> None:
         nonlocal last_pct
-        try:
-            pos = raw.tell() if raw is not None else 0
-        except Exception:  # noqa: BLE001
-            pos = 0
         pct = int(pos * 100 / max(size, 1)) if pos else -1
         if pct >= 0 and pct // 5 != last_pct // 5:
             last_pct = pct
             log(f"[db] {src.name}: {pct}% ({len(writers)} tables, {sum(w.rows for w in writers.values())} rows, {(time.time() - t0):.0f} s)")
 
-    def writer_for(db: str, table: str, ncols_hint: Optional[list[str]]) -> TableWriter:
-        key = (db, table)
-        if key not in writers:
-            cols = ncols_hint or columns.get(key) or []
-            writers[key] = TableWriter(out / slug(db), slug(table), cols, rows_per_file)
-        return writers[key]
-
-    with _open_text(src) as f:
-        raw = getattr(f, "buffer", None)
-        if raw is not None and hasattr(raw, "fileobj"):      # gzip: position in the compressed file
-            raw = raw.fileobj
-        if kind == "pg-dump":
+    stats: dict[str, int] = {}
+    if kind == "pg-dump":
+        with _open_text(src) as f:
+            raw = getattr(f, "buffer", None)
+            if raw is not None and hasattr(raw, "fileobj"):      # gzip: position in the compressed file
+                raw = raw.fileobj
             for line in f:
                 m = _COPY_RE.match(line)
                 if m:
@@ -520,7 +887,10 @@ def extract_dump(src: Path, out: Path, log: Log, kind: str = "mysql-dump", rows_
                     w = writer_for(db, table, cols)
                     for row in _pg_copy_rows(f, len(cols)):
                         w.write_text_row(row)
-                    progress()
+                    try:
+                        progress_at(raw.tell() if raw is not None else 0)
+                    except Exception:  # noqa: BLE001
+                        pass
                 elif re.match(r"^\s*CREATE TABLE", line, re.I):
                     schema_lines.append(line)
                     for nxt in f:
@@ -528,47 +898,19 @@ def extract_dump(src: Path, out: Path, log: Log, kind: str = "mysql-dump", rows_
                         if nxt.rstrip().endswith(";"):
                             break
                     schema_lines.append("\n")
-        else:
-            for stmt in _statements(f):
-                head = stmt.lstrip()[:12].upper()
-                if head.startswith("INSERT") or head.startswith("REPLACE"):
-                    m = _INSERT_RE.match(stmt)
-                    if not m:
-                        continue
-                    db = m.group("db") or cur_db
-                    table = m.group("t")
-                    cols = [c.strip().strip('`"') for c in (m.group("cols") or "").split(",") if c.strip()] or None
-                    w = writer_for(db, table, cols)
-                    body = stmt[m.end():]
-                    wr = w.write_text_row
-                    for row in parse_values(body):
-                        if not w.columns:
-                            w.columns = [f"col{i + 1}" for i in range(len(row))]
-                        wr(row)
-                    progress()
-                elif head.startswith("CREATE TABLE") or head.startswith("CREATE TEMP"):
-                    m = _CREATE_RE.match(stmt)
-                    if m:
-                        db = m.group("db") or cur_db
-                        key = (db, m.group("t"))
-                        columns[key] = columns_from_create(stmt)
-                        if key in writers and not writers[key].columns:
-                            writers[key].columns = columns[key]
-                    schema_lines.append(stmt.strip() + "\n\n")
-                elif head.startswith("USE"):
-                    m = _USE_RE.match(stmt)
-                    if m:
-                        cur_db = m.group(1)
-                elif head.startswith("CREATE DATAB"):
-                    m = re.match(r"^\s*CREATE\s+DATABASE\s+(?:IF\s+NOT\s+EXISTS\s+)?[`\"]?([^`\";\s]+)", stmt, re.I)
-                    if m:
-                        cur_db = m.group(1)
+    else:
+        chunks, pos_fn = _chunk_source(src)
+        stats = parse_mysql_dump(chunks, writer_for, on_create, None, lambda consumed: progress_at(pos_fn()))
     for (db, table), w in sorted(writers.items()):
         r = w.close()
         tables.append({"database": db, "table": table, "rows": r["rows"], "columns": len(w.columns), "files": r["files"], "bytes": r["bytes"], "blobs": r["blobs"]})
     (out / "schema.sql").write_text("".join(schema_lines), "utf-8")
-    log(f"[db] {src.name}: done - {len(tables)} tables, {sum(t['rows'] for t in tables)} rows in {(time.time() - t0) / 60:.1f} min")
-    return {"tables": tables, "seconds": round(time.time() - t0, 1)}
+    log(f"[db] {src.name}: done - {len(tables)} tables, {sum(t['rows'] for t in tables)} rows in {(time.time() - t0) / 60:.1f} min"
+        + (f" ({stats['inserts']} INSERTs, {stats['creates']} CREATE TABLEs, {stats['skipped']} other statements skipped, {stats['malformed']} malformed)" if stats else ""))
+    if stats and not tables:
+        log("[db]   no INSERT or CREATE TABLE statement was recognised: not a MySQL/MariaDB dump, or a dialect the reader does not know - "
+            "send the first lines of the file (head -c 2000) so it can be added")
+    return {"tables": tables, "seconds": round(time.time() - t0, 1), "stats": stats}
 
 
 # --------------------------------------------------------------------------- parallel dump parsing
@@ -576,94 +918,109 @@ PARALLEL_MIN_BYTES = 512 * 2**20
 _STMT_STARTS = (b"INSERT INTO", b"REPLACE INT", b"CREATE TABL", b"DROP TABLE ", b"LOCK TABLES", b"UNLOCK TABL", b"-- ", b"/*!40000 AL", b"USE `", b"CREATE DATA")
 
 
+_SPLIT_RE = re.compile(rb"\n(?:INSERT |REPLACE |CREATE TABLE|DROP TABLE |LOCK TABLES|UNLOCK TABLES|-- |/\*!40000 ALTER|USE `|CREATE DATABASE|GO\r?\n)", re.I)
+
+
 def _split_points(src: Path, n: int) -> list[int]:
-    """Byte offsets that start a statement line, spread evenly: each worker parses [p[i], p[i+1])."""
+    """Byte offsets that start a statement line, spread evenly: each worker parses [p[i], p[i+1]). Found by scanning
+    chunks (never readline: a dump may keep a whole table on one multi-GB line)."""
     size = src.stat().st_size
     step = size // n
     points = [0]
     with open(src, "rb") as f:
         for i in range(1, n):
-            f.seek(i * step)
-            f.readline()                       # the rest of the line we landed in
-            while True:
-                pos = f.tell()
-                line = f.readline()
-                if not line:
+            target = i * step
+            f.seek(target)
+            found = None
+            scanned = 0
+            while scanned < 256 * 2**20:           # a statement start within 256 MB of the target, else no split here
+                base = f.tell()
+                b = f.read(2**20)
+                if not b:
                     break
-                if line[:11].upper().startswith(_STMT_STARTS) or line.upper().startswith(_STMT_STARTS):
-                    points.append(pos)
+                m = _SPLIT_RE.search(b)
+                if m is not None and (m.start() + 1 < len(b) - 1 or True):
+                    found = base + m.start() + 1
                     break
+                scanned += len(b)
+                f.seek(base + len(b) - 20)          # overlap so a start spanning chunks is not missed
+            if found is not None and found < size:
+                points.append(found)
     points.append(size)
     return sorted(set(points))
 
 
-def _lines_in_range(src: Path, start: int, end: int) -> Iterator[str]:
+_DBSWITCH_RE = re.compile(rb"\n(?:USE\s+[`\"]?([^`\";\s]+)|CREATE\s+DATABASE\s+(?:IF\s+NOT\s+EXISTS\s+)?[`\"]?([^`\";\s]+))", re.I)
+
+
+def _db_switches(src: Path) -> list[tuple[int, str]]:
+    """(byte offset, database) for every USE / CREATE DATABASE at a line start, so a byte-range worker knows which
+    database its first statements belong to."""
+    out: list[tuple[int, str]] = []
     with open(src, "rb") as f:
-        f.seek(start)
-        pos = start
-        while pos < end:
-            line = f.readline()
-            if not line:
+        base = 0
+        carry = b""
+        while True:
+            b = f.read(8 * 2**20)
+            if not b:
                 break
-            pos += len(line)
-            yield line.decode("utf-8", "replace")
+            buf = carry + b
+            for m in _DBSWITCH_RE.finditer(buf):
+                name = (m.group(1) or m.group(2) or b"").decode("utf-8", "replace")
+                if name:
+                    out.append((base - len(carry) + m.start(), name))
+            carry = buf[-256:]
+            base += len(b)
+    return out
+
+
+def _db_at(switches: list[tuple[int, str]], offset: int) -> str:
+    db = "dump"
+    for off, name in switches:
+        if off < offset:
+            db = name
+        else:
+            break
+    return db
 
 
 def _dump_worker(args) -> dict[str, Any]:
-    src, start, end, out, idx, rows_per_file = args
+    src, start, end, out, idx, rows_per_file, initial_db = args
     src, out = Path(src), Path(out)
     writers: dict[tuple[str, str], TableWriter] = {}
     columns: dict[tuple[str, str], list[str]] = {}
     schema: list[str] = []
-    cur_db = "dump"
     t0 = time.time()
-    done_bytes = 0
     last = -1
-    for stmt in _statements(_lines_in_range(src, start, end)):
-        done_bytes += len(stmt)
-        head = stmt.lstrip()[:12].upper()
-        if head.startswith("INSERT") or head.startswith("REPLACE"):
-            m = _INSERT_RE.match(stmt)
-            if not m:
-                continue
-            db = m.group("db") or cur_db
-            table = m.group("t")
-            key = (db, table)
-            w = writers.get(key)
-            if w is None:
-                cols = [c.strip().strip('`"') for c in (m.group("cols") or "").split(",") if c.strip()] or columns.get(key) or []
-                w = writers[key] = TableWriter(out / slug(db), f"{slug(table)}.w{idx:02d}", cols, rows_per_file)
-            wr = w.write_text_row
-            for row in parse_values(stmt[m.end():]):
-                if not w.columns:
-                    w.columns = [f"col{i + 1}" for i in range(len(row))]
-                wr(row)
-            pct = int(done_bytes * 100 / max(end - start, 1))
-            if pct // 10 != last // 10:
-                last = pct
-                print(f"[db] worker {idx}: {pct}% ({sum(x.rows for x in writers.values())} rows, {time.time() - t0:.0f} s)", flush=True)
-        elif head.startswith("CREATE TABLE") or head.startswith("CREATE TEMP"):
-            m = _CREATE_RE.match(stmt)
-            if m:
-                key = (m.group("db") or cur_db, m.group("t"))
-                columns[key] = columns_from_create(stmt)
-                if key in writers and not writers[key].columns:
-                    writers[key].columns = columns[key]
-            schema.append(stmt.strip() + "\n\n")
-        elif head.startswith("USE"):
-            m = _USE_RE.match(stmt)
-            if m:
-                cur_db = m.group(1)
-        elif head.startswith("CREATE DATAB"):
-            m = re.match(r"^\s*CREATE\s+DATABASE\s+(?:IF\s+NOT\s+EXISTS\s+)?[`\"]?([^`\";\s]+)", stmt, re.I)
-            if m:
-                cur_db = m.group(1)
+
+    def writer_for(db: str, table: str, cols: Optional[list[str]]) -> TableWriter:
+        key = (db, table)
+        w = writers.get(key)
+        if w is None:
+            w = writers[key] = TableWriter(out / slug(db), f"{slug(table)}.w{idx:02d}", cols or columns.get(key) or [], rows_per_file)
+        return w
+
+    def on_create(db: str, table: str, text: str) -> None:
+        key = (db, table)
+        columns[key] = columns_from_create(text)
+        if key in writers and not writers[key].columns:
+            writers[key].columns = columns[key]
+        schema.append(text.strip() + "\n\n")
+
+    def prog(consumed: int) -> None:
+        nonlocal last
+        pct = int(consumed * 100 / max(end - start, 1))
+        if pct // 10 != last // 10:
+            last = pct
+            print(f"[db] worker {idx}: {pct}% ({sum(x.rows for x in writers.values())} rows, {time.time() - t0:.0f} s)", flush=True)
+
+    stats = parse_mysql_dump(_byte_chunks(src, start, end), writer_for, on_create, None, prog, initial_db=initial_db)
     tables = {}
     for key, w in writers.items():
         r = w.close()
         tables[key] = {"rows": r["rows"], "files": r["files"], "columns": list(w.columns), "placeholder": bool(w.columns) and w.columns[0] == "col1" and key not in columns}
     return {"idx": idx, "tables": {f"{k[0]}\x00{k[1]}": v for k, v in tables.items()}, "columns": {f"{k[0]}\x00{k[1]}": v for k, v in columns.items()},
-            "schema": "".join(schema), "seconds": round(time.time() - t0, 1)}
+            "schema": "".join(schema), "seconds": round(time.time() - t0, 1), "stats": stats}
 
 
 def _rewrite_header(path: Path, columns: list[str]) -> None:
@@ -681,9 +1038,10 @@ def extract_dump_parallel(src: Path, out: Path, log: Log, workers: int, rows_per
     t0 = time.time()
     points = _split_points(src, workers)
     ranges = [(points[i], points[i + 1]) for i in range(len(points) - 1) if points[i + 1] > points[i]]
-    log(f"[db] {src.name}: {human(src.stat().st_size)} parsed by {len(ranges)} workers")
+    switches = _db_switches(src)
+    log(f"[db] {src.name}: {human(src.stat().st_size)} parsed by {len(ranges)} workers" + (f"; {len(switches)} database switches" if switches else ""))
     with ProcessPoolExecutor(max_workers=len(ranges)) as ex:
-        results = list(ex.map(_dump_worker, [(str(src), a, b, str(out), i, rows_per_file) for i, (a, b) in enumerate(ranges)]))
+        results = list(ex.map(_dump_worker, [(str(src), a, b, str(out), i, rows_per_file, _db_at(switches, a)) for i, (a, b) in enumerate(ranges)]))
     results.sort(key=lambda r: r["idx"])
     # columns known anywhere (CREATE TABLE) win over placeholders
     columns: dict[str, list[str]] = {}
@@ -848,14 +1206,36 @@ def extract(case, source: dict[str, Any], work: Path, log: Log = print, rows_per
     source.json / tables.csv / schema.sql in <case>/db/<slug>/. Returns the summary."""
     kind = source["kind"]
     src = Path(source["path"])
-    name = slug(source.get("rel", src.name).strip("/").replace("/", "-") or src.name)
+    name = export_name(source)
     root = export_root(case, out_root)
     out = root / name
     idx = case.dir / "db" / name
+    # never wipe another source's export: the folder is reused only when its source.json names this same source
+    for d in {out, idx}:
+        sj = d / "source.json"
+        if sj.exists():
+            try:
+                prev = json.loads(sj.read_text("utf-8"))
+            except Exception:  # noqa: BLE001
+                prev = {}
+            if prev.get("source") not in (None, str(src)) and prev.get("rel") not in (None, source.get("rel")):
+                raise RuntimeError(f"export folder {d} belongs to another source ({prev.get('source')}); not overwriting it")
     for d in {out, idx}:
         if d.exists():
             shutil.rmtree(d)
         d.mkdir(parents=True)
+    # the folder an older build (f) used for this source - shared by every source under one long path - goes when it was
+    # this source's, so the stale "0 tables" entry disappears on re-extraction
+    for d in {root / legacy_export_name(source), case.dir / "db" / legacy_export_name(source)}:
+        sj = d / "source.json"
+        if d != out and d != idx and sj.exists():
+            try:
+                prev = json.loads(sj.read_text("utf-8"))
+                if prev.get("source") == str(src):
+                    shutil.rmtree(d)
+                    log(f"[db] removed the old export folder {d} (replaced by {name})")
+            except Exception:  # noqa: BLE001
+                pass
     t0 = time.time()
     log(f"[db] extracting {kind} {src} -> {out}")
     case.custody.append("db_extract_started", {"kind": kind, "source": str(src), "out": str(out)})
