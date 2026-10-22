@@ -994,8 +994,25 @@ class Intake:
         (case.dir / "intake.json").write_text(json.dumps(self.record, indent=2, ensure_ascii=False, default=str), "utf-8")
 
 
+def reachable(p: str, readonly: bool = True) -> tuple[Path, str]:
+    """A recorded image path - Windows (`D:\\x`, `\\\\server\\share\\x`) or distro form (`/mnt/d/x`, `/mnt/unc/server/share/x`) -
+    made reachable again: after a reboot the mapped drives and shares are not mounted inside the distro until
+    something mounts them (drvfs, with the examiner's Windows credentials). (path inside the distro, note when
+    the drive/share could not be opened)."""
+    from .winpath import to_wsl, to_windows
+    s = str(p)
+    if re.match(r"^(?:[A-Za-z]:|\\\\|//)", s):
+        w, note = to_wsl(s, readonly)
+        return Path(w), note
+    if s.startswith("/mnt/unc/") or re.match(r"^/mnt/[a-zA-Z]/", s):
+        w, note = to_wsl(to_windows(s), readonly)
+        return Path(w), note
+    return Path(s), ""
+
+
 def remount(case: Case, log: Log = print, replace_mount: bool = False) -> dict[str, Any]:
-    """After a reboot: put the case's evidence back exactly as intake mounted it."""
+    """After a reboot: put the case's evidence back exactly as intake mounted it (shares and mapped drives the
+    images live on are mounted again first)."""
     rec_path = case.dir / "intake.json"
     if not rec_path.exists():
         img = case.meta.get("image_path")
@@ -1007,22 +1024,31 @@ def remount(case: Case, log: Log = print, replace_mount: bool = False) -> dict[s
     if rec.get("mode") == "export":
         log("[remount] export-mode case: nothing to mount")
         return rec
+    if not rec.get("images"):
+        raise SystemExit("this case's intake record lists no image (a database-only or folder case): nothing to mount")
+    root_img, note = reachable(rec["images"][0])
     if os.path.ismount(rec.get("mount_root") or DEFAULT_TARGET):
         st = mounted_now()
-        if st.get("IMAGE") and rec.get("images") and os.path.realpath(st["IMAGE"]) == os.path.realpath(rec["images"][0]):
+        if st.get("IMAGE") and (os.path.realpath(st["IMAGE"]) == os.path.realpath(str(root_img)) or os.path.realpath(st["IMAGE"]) == os.path.realpath(rec["images"][0])):
             log("[remount] already mounted")
             return rec
         if not replace_mount:
             raise SystemExit(f"something else is mounted at {rec.get('mount_root')} ({st.get('IMAGE', '?')}); unmount it first")
         umount_all(log)
-    root_img = Path(rec["images"][0])
     if not root_img.exists():
-        raise SystemExit(f"the image is not where it was: {root_img}")
+        where = f" (looked for it at {root_img} inside the distro)" if str(root_img) != str(rec["images"][0]) else ""
+        raise SystemExit(f"the image is not where it was: {rec['images'][0]}{where}" + (f"; {note}" if note else
+                         ". Is the share or drive reachable from this machine right now (open it in Explorer), and is the file still there?"))
+    log(f"[remount] image {rec['images'][0]}" + (f" -> {root_img}" if str(root_img) != str(rec["images"][0]) else ""))
     rc, _ = mount_image(root_img, log, target=rec.get("mount_root") or DEFAULT_TARGET)
     if rc != 0:
         raise SystemExit("mount failed")
     for v in rec.get("volumes", []):
         if v.get("mounted") and v.get("image"):
-            mount_image(Path(v["image"]), log, part=v.get("part") or "", lv=v.get("lv") or "", at=v["mountpoint"])
+            vimg, vnote = reachable(v["image"])
+            if not vimg.exists():
+                log(f"[remount] second volume skipped: {v['image']} is not reachable" + (f" ({vnote})" if vnote else ""))
+                continue
+            mount_image(vimg, log, part=v.get("part") or "", lv=v.get("lv") or "", at=v["mountpoint"])
     case.custody.append("remounted", {"images": rec.get("images"), "volumes": [v.get("mountpoint") for v in rec.get("volumes", []) if v.get("mounted")]})
     return rec

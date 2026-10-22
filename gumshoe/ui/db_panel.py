@@ -21,6 +21,9 @@ from gumshoe import dbexport
 from gumshoe.ui.run_panel import _logs, _alive, progress_of_text, tail_log
 from gumshoe.winpath import to_windows
 
+csv.field_size_limit(min(sys.maxsize, 2**31 - 1))   # exported rows can carry cells far beyond csv's 128 KB default
+
+
 DB_MILESTONES = [("start:", 2, "starting"), ("[db] scan", 4, "scanning the evidence for databases"), ("[db] extracting", 8, "extracting"),
                  ("[db] hashing", 10, "hashing the source"), ("[db] copying", 12, "copying the data directory"),
                  ("[db] datadir", 14, "preparing the data directory"), ("[db] private server up", 18, "private server started"),

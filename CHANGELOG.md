@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Remount after a reboot works for evidence on a share or a mapped drive: the recorded image paths (Windows,
+  UNC or distro form) are resolved through winpath again, so `\\server\share\...` is mounted inside the distro
+  (drvfs) before the image is looked for; the error names the path that was tried and why the share could not
+  be opened. Second volumes that are unreachable are skipped with a note instead of failing the remount.
+- Players / Databases / fingerprint: csv's 128 KB field limit is lifted everywhere exported CSVs are read (dump
+  rows with serialized blobs or HTML killed the whole players build with `field larger than field limit`); a
+  table that cannot be read is reported as NOT READ and the build continues; when no table can be scanned the
+  log says which CSV folder is missing instead of silently reporting 0 identifiers.
 - **Gumshoe-Rescue.bat** (`setup/offline/rescue.ps1`): for the WSL failure where the distro will not start
   (`getpwnam(root) failed 5`, `User not found`, `WSL_E_USER_NOT_FOUND` - the distro's virtual disk cannot be
   opened, usually because its drive is full): reports the disk, its drive's free space and the WSL version;

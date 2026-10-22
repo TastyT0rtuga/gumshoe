@@ -26,6 +26,7 @@ import os
 import pickle
 import re
 import sqlite3
+import sys
 import tempfile
 import time
 from collections import Counter, defaultdict
@@ -37,6 +38,7 @@ from . import identifiers as idf
 from .integrity import utc_now
 
 Log = Callable[[str], None]
+csv.field_size_limit(min(sys.maxsize, 2**31 - 1))   # exported rows can carry cells far beyond csv's 128 KB default
 STRONG = ("email", "phone", "wallet", "pwhash", "iban", "card", "sshkey", "txid")
 ACCOUNT_TABLE_RE = re.compile(r"(user|customer|client|member|account|profile|contact|person|people|employee|staff|admin|vendor|seller|buyer|"
                               r"merchant|subscriber|registr|login|auth|ftp|panel|wallet|kyc|partner|agent|affiliate|lead|order)", re.I)
@@ -213,10 +215,23 @@ def _fk_targets(header: list[str], tables: dict[str, dict[str, Any]], this_table
 
 
 def _scan_table(args) -> str:
-    """Worker: one CSV table (all its part files) -> an Acc, streamed into a pack file (its path is returned)."""
+    """Worker: one CSV table (all its part files) -> an Acc, streamed into a pack file (its path is returned).
+    A table that cannot be read is reported inside the pack (header "error") instead of sinking the build."""
     source, db, table, files, fk_maps, rows_cap, packdir = args
+    csv.field_size_limit(min(sys.maxsize, 2**31 - 1))          # dump rows can carry very large text cells
     where = f"{db}.{table}"
     acc = Acc(source, where)
+    try:
+        return _scan_table_inner(acc, source, db, table, files, fk_maps, rows_cap, packdir)
+    except Exception as e:  # noqa: BLE001 - one unreadable table must not lose the others
+        acc.tables = acc.tables or [{"source": source, "database": db, "table": table, "columns": [], "types": [], "account_table": False, "tx_table": False, "files": [Path(f).name for f in files]}]
+        acc.tables[0]["error"] = f"{type(e).__name__}: {str(e)[:300]}"
+        acc.ent = {}; acc.pairs = {}; acc.activity = {}; acc.money = []; acc.account_rows = []
+        return _pack(acc, packdir)
+
+
+def _scan_table_inner(acc: Acc, source: str, db: str, table: str, files: list, fk_maps, rows_cap: int, packdir) -> str:
+    where = acc.where
     header, samples = _read_header_and_samples(Path(files[0]))
     ctypes = type_columns(header, samples)
     is_account = bool(ACCOUNT_TABLE_RE.search(table)) and any(t in ("email", "username", "phone") for t in ctypes)
@@ -938,6 +953,8 @@ def build(case, log: Log = print, workers: Optional[int] = None) -> dict[str, An
     jobs = []
     exports = dbexport.list_exports(case)
     tables_by_name: dict[str, dict[str, Any]] = {}
+    listed = 0
+    missing_example = ""
     for e in exports:
         out = Path(e.get("out") or "")
         tcsv = Path(e["dir"]) / "tables.csv"
@@ -947,13 +964,24 @@ def build(case, log: Log = print, workers: Optional[int] = None) -> dict[str, An
             for r in csv.DictReader(f):
                 if not r.get("files") or SKIP_TABLE_RE.search(r["table"] or ""):
                     continue
+                listed += 1
                 files = [str(out / dbexport.slug(r["database"]) / fn.strip()) for fn in r["files"].split(";") if fn.strip()]
-                files = [fn for fn in files if Path(fn).exists()]
-                if not files:
+                present = [fn for fn in files if Path(fn).exists()]
+                if not present:
+                    missing_example = missing_example or (files[0] if files else "")
                     continue
+                files = present
                 tables_by_name[r["table"]] = {"source": e["name"], "db": r["database"], "files": files}
                 jobs.append((e["name"], r["database"], r["table"], files))
-    log(f"[players] {len(jobs)} tables from {len(exports)} database export(s)")
+    log(f"[players] {len(jobs)} tables from {len(exports)} database export(s)" + (f"; {listed - len(jobs)} listed table(s) skipped" if listed > len(jobs) else ""))
+    if exports and not jobs:
+        for e in exports:
+            out = Path(e.get("out") or "")
+            tcsv = Path(e["dir"]) / "tables.csv"
+            log(f"[players]   export {e['name']}: tables.csv {'found' if tcsv.exists() else 'MISSING'} at {tcsv}; CSV folder {out} {'exists' if out.is_dir() else 'MISSING'}"
+                + (f" (first missing file: {missing_example})" if missing_example else ""))
+        log("[players]   nothing to scan: the CSV folders of the exports are not where source.json says (exports folder moved or unmounted?). "
+            "Databases tab -> Extract again, or Hopper -> Folders to point the exports folder at the drive.")
     fk_db = path.parent / "fk.sqlite"
     keyed = build_fk_cache({n: t for n, t in tables_by_name.items()}, log, fk_db) if jobs else set()
     fk_maps = {}
@@ -977,6 +1005,9 @@ def build(case, log: Log = print, workers: Optional[int] = None) -> dict[str, An
         head = store.merge(pack_path)
         done += 1
         t = head["tables"][0]
+        if t.get("error"):
+            log(f"[players] [{done}/{len(args)}] {t['database']}.{t['table']}: NOT READ - {t['error']}")
+            return
         log(f"[players] [{done}/{len(args)}] {t['database']}.{t['table']}: {head['rows']} rows, {head['n'][0]} identifiers" + _cap_note(head))
 
     if args:

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import bz2
 import csv
+import sys
 import gzip
 import hashlib
 import io
@@ -36,6 +37,9 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
 from .integrity import utc_now
+
+csv.field_size_limit(min(sys.maxsize, 2**31 - 1))   # exported rows can carry cells far beyond csv's 128 KB default
+
 
 Log = Callable[[str], None]
 ROWS_PER_FILE = 1_000_000

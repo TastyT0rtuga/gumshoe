@@ -29,9 +29,11 @@ No model is involved; the result is written to <case>/collected/fingerprint.json
 """
 from __future__ import annotations
 
+import csv
 import json
 import os
 import re
+import sys
 import time
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -41,6 +43,7 @@ from .integrity import utc_now
 from .probe import WEB_ROOTS, _nonempty_dir, os_release, _read_small
 
 Log = Callable[[str], None]
+csv.field_size_limit(min(sys.maxsize, 2**31 - 1))   # exported rows can carry cells far beyond csv's 128 KB default
 MAX_FILES = 100_000            # composition walk per application root
 WALK_BUDGET_S = 15.0           # per application root
 TOTAL_BUDGET_S = 300.0         # all compositions together; later roots get candidates and packages only
@@ -866,7 +869,6 @@ def db_candidates(table_names: list[str]) -> dict[str, Any]:
 
 def fingerprint_databases(case) -> list[dict[str, Any]]:
     from . import dbexport
-    import csv
     out = []
     for e in dbexport.list_exports(case):
         tcsv = Path(e["dir"]) / "tables.csv"
