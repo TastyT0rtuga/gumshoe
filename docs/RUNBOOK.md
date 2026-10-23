@@ -198,7 +198,32 @@ tables, send its first lines (`head -c 2000`) so the dialect can be added. A row
 of is skipped and logged with its position (the rest of the statement is still read); an extraction that
 stops half-way (disk full) keeps every row written so far and is marked `partial:` with the reason in
 `tables.csv` and the Databases tab - re-run it after fixing the cause.
-Search every exported table from the tab (name, e-mail, phone, IP ...), case-insensitive, any script.
+**Explore, search and export without SQL** (section 3 of the tab, three sub-tabs; nothing here needs Docker, a
+database server or a terminal):
+
+- **Explore** - one catalog of every table across every export of the case. Type part of a table name, a
+  database name or a *column* name (`wallet`, `phone`, `users`) to narrow a server with a hundred tables to the
+  ones that matter; tick tables to work on them together (search only those, load them, export them). Open any
+  table: a paged viewer (100-1,000 rows a page) with a per-column "contains" filter, or a filter over every
+  column; once the table is loaded in the workbench, paging is instant and any column sorts (tick "as numbers"
+  for amounts and ids). "Export these rows" writes what you see; "Export ticked tables" copies whole tables (and
+  their blobs) into `<exports>\<case>\db-selection\<stamp>\` with a manifest of SHA-256s. Every row shows `_file`
+  and `_line`: the exported CSV file and the line the row came from, so it can be found again in the full export.
+- **Search** - a name, e-mail, phone, wallet, IP, hash or a Cyrillic word, as a phrase, all words, any word or a
+  regex, across every table or the ticked ones. First the tables that hold it with a line count (grep: seconds on
+  gigabytes), then click a table for its matching rows with the table's own columns - matched exactly, row by row,
+  a cell holding newlines counted once - optionally only in named columns (`email, phone`). **Export every matching
+  row (all tables)** writes one CSV per table (header + `_file`/`_line` + the row), `summary.csv` with a SHA-256 per
+  file, `query.json` and a README into `<exports>\<case>\db-search\<stamp>-<query>\`; big exports run in the
+  background and the folder is named in the log. Every search and export is a custody record.
+- **SQL workbench** - for whoever wants SQL: tick tables, **Load** (a read-only SQLite file inside the case, about
+  ten seconds per million rows; "Load every table" skips tables over 2 GB of CSV), then type `SELECT`/`WITH`
+  statements - joins across tables, GROUP BY, LIKE - with 2,000 rows and 120 s per query, and export a result to
+  CSV. Every column is text (the CSV is exact): compare or sort amounts with `CAST(amount AS REAL)`. The list under
+  the Load button gives each table's SQL name (`<database>__<table>`). Unload frees the space; the CSV exports stay.
+
+The same from the command line: `gumshoe db catalog`, `gumshoe db search "text" --mode all --tables x/db/t --columns
+email --export`, `gumshoe db load --tables x/db/t,...` (or `--all`), `gumshoe db sql "SELECT ..."`.
 
 ### What is it built on: the fingerprint
 

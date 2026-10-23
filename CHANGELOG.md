@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **Databases tab: explore, search and export without SQL, Docker or a database server** (the team's workaround was
+  loading each dump into MariaDB in a Docker container and typing queries). Three sub-tabs under the extracted
+  databases: **Explore** - one catalog of every table across every export (a server with 100+ tables is one filterable
+  list: by table, database or column name), tick tables, open any table in a paged viewer with per-column filters
+  (sorting, numeric sorting and instant paging once it is loaded in the workbench), export the rows you see or whole
+  tables to a folder. **Search** - a phrase, all words, any word or a regex across every table or the ticked ones:
+  hits per table (grep, seconds on gigabytes), the matching rows of any table with its own columns, exact per-row
+  matching (a cell holding newlines is one row), optionally only in named columns, and one click to export every
+  matching row of every table to `<exports>\<case>\db-search\<stamp>-<query>\` (one CSV per table with `_file`/`_line`
+  locators, summary.csv with SHA-256s, query.json, README) - in the background when big. **SQL workbench** - tick
+  tables, load them into a read-only SQLite file in the case (about ten seconds per million rows, `db load`), then
+  SELECT/WITH with a row and time limit, results exportable; every column is text (CAST for numbers), `_file`/`_line`
+  on every row. Every search, export and load is a custody record. CLI: `gumshoe db catalog | search --mode
+  phrase|all|any|regex [--tables] [--columns] [--export] | load --tables|--all | sql`. Checked by
+  `tests/explorer_check.py`.
 - **The AI assistant is a switch, off by default.** Nothing in the evidence ever depended on the model; now the
   packaging says so too. `llm.enabled: false` in config.yaml, a sidebar switch (saved beside the cases in
   `gumshoe-settings.json`) that overrides it per machine, and under it a panel listing what the model unlocks

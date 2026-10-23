@@ -271,8 +271,50 @@ def cmd_db(args):
                   (f"  ERROR {e['error']}" if e.get("error") else ""))
         return
     if args.db_cmd == "search":
-        for h in dbexport.search(c, args.text, max_hits=args.max):
-            print(f"{h['export']}/{h['database']}/{h['table']}:{h['line']}: {h['text'][:200]}")
+        from . import dbexplore
+        keys = set(args.tables.split(",")) if args.tables else None
+        cols = [x.strip() for x in args.columns.split(",")] if args.columns else None
+        if args.export:
+            r = dbexplore.export_search(c, args.text, args.mode, keys, cols, log=print)
+            print(json.dumps({k: r[k] for k in ("matching_rows", "tables_with_matches", "out", "seconds")}, indent=2))
+            return
+        hits = dbexplore.search_counts(c, args.text, args.mode, keys)
+        print(f"{len(hits)} table(s) with candidate lines for {args.text!r} ({args.mode}):")
+        for h in hits:
+            print(f"  {h['export']}/{h['database']}/{h['table']}: ~{h['candidate_lines']} line(s) of {h['rows']} rows")
+        if hits and args.rows:
+            e = dbexplore.entry(c, hits[0]["key"])
+            r = dbexplore.search_rows(e, args.text, args.mode, limit=args.max, columns=cols)
+            print(f"\n{hits[0]['database']}.{hits[0]['table']}: first {r['shown']} matching rows" + (" (more)" if r["truncated"] else ""))
+            print(",".join(["_file", "_line"] + r["header"]))
+            for row in r["rows"]:
+                print(",".join(str(x)[:60] for x in row))
+        return
+    if args.db_cmd == "catalog":
+        from . import dbexplore
+        for t in dbexplore.catalog(c):
+            print(f"{t['key']:60s} {t['rows']:>10} rows  {len(t['columns']):>3} cols  {dbexport.human(t['bytes']):>8}  {', '.join(t['columns'][:8])}{' ...' if len(t['columns']) > 8 else ''}")
+        return
+    if args.db_cmd == "load":
+        from . import dbexplore
+        if args.all:
+            keys = [t["key"] for t in dbexplore.catalog(c) if t["bytes"] <= args.max_gb * 2**30]
+        else:
+            keys = [k for k in (args.tables or "").split(",") if k]
+        if not keys:
+            sys.exit("nothing to load: --tables export/db/table,... or --all")
+        print(json.dumps(dbexplore.load_tables(c, keys, log=print), indent=2)[:2000])
+        return
+    if args.db_cmd == "sql":
+        from . import dbexplore
+        r = dbexplore.sql(c, args.statement, limit=args.max)
+        if r.get("error"):
+            sys.exit(r["error"])
+        print(",".join(r["header"]))
+        for row in r["rows"]:
+            print(",".join("" if v is None else str(v) for v in row))
+        if r.get("truncated"):
+            print(f"... (first {args.max} rows)")
         return
     # extract
     from .settings import work_dir
@@ -646,7 +688,14 @@ def main(argv=None):
     d = dsub.add_parser("extract", help="extract to CSV: the scan's picks, --all, --index 0,2, or a path (datadir, .sql, .sql.gz, sqlite)")
     d.add_argument("path", nargs="?"); d.add_argument("--all", action="store_true"); d.add_argument("--index")
     d = dsub.add_parser("list", help="what has been extracted")
-    d = dsub.add_parser("search", help="search every exported CSV"); d.add_argument("text"); d.add_argument("--max", type=int, default=500)
+    d = dsub.add_parser("search", help="search the extracted tables (grep, then exact per-row matching); --export writes every matching row per table to <exports>/<case>/db-search/")
+    d.add_argument("text"); d.add_argument("--mode", choices=("phrase", "all", "any", "regex"), default="phrase"); d.add_argument("--tables", help="export/db/table keys, comma-separated (see `db catalog`)")
+    d.add_argument("--columns", help="match only in these columns (names, comma-separated)"); d.add_argument("--rows", action="store_true", help="also print the matching rows of the top table")
+    d.add_argument("--export", action="store_true"); d.add_argument("--max", type=int, default=500)
+    d = dsub.add_parser("catalog", help="every extracted table with its rows, columns and size")
+    d = dsub.add_parser("load", help="load tables into the SQLite workbench (read-only SQL, instant sorting/filtering): --tables keys | --all"); d.add_argument("--tables"); d.add_argument("--all", action="store_true")
+    d.add_argument("--max-gb", type=float, default=2.0, help="with --all: skip tables bigger than this (CSV size)")
+    d = dsub.add_parser("sql", help="read-only SQL over the workbench"); d.add_argument("statement"); d.add_argument("--max", type=int, default=200)
     s = sub.add_parser("players", help="who is in the evidence: identifiers, links, timelines, wallets and money (build / list / show / find / trends)"); s.set_defaults(fn=cmd_players)
     psub = s.add_subparsers(dest="p_cmd", required=True)
     d = psub.add_parser("build"); d.add_argument("--workers", type=int)

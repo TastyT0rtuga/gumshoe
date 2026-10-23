@@ -69,7 +69,7 @@ def render_db_tab(case, root: Path, cases_root: Path):
     st.markdown(f"CSV folders go to **`{to_windows(str(out_root))}`** (one folder per source, one per database, one CSV per table; "
                 f"tables over 1,000,000 rows are split into `.partNNN.csv` files for Excel). Explorer also reaches the case at "
                 f"`\\\\wsl.localhost\\DFIR\\opt\\dfir\\cases\\{case.meta.get('case_id')}`.")
-    running_steps = [s for s in ("dbscan", "dbextract") if _status(case.dir, s)[0] == "running"]
+    running_steps = [s for s in ("dbscan", "dbextract", "dbload", "dbsearch") if _status(case.dir, s)[0] == "running"]
     frag = st.fragment(lambda: _body(case, root, cases_root), run_every="5s" if running_steps else None)
     frag()
 
@@ -188,24 +188,7 @@ def _body(case, root: Path, cases_root: Path):
                 with st.expander("schema.sql"):
                     st.code(sch.read_text("utf-8", errors="replace")[:20000], language="sql")
 
-    # ---- 3. search
-    st.subheader("3. Search every extracted table")
-    q = st.text_input("Text to find (name, e-mail, phone, IP, hash ...; case-insensitive, any script)", key="db_q")
-    if q.strip():
-        with st.spinner("searching..."):
-            hits = dbexport.search(case, q.strip(), max_hits=500)
-        st.caption(f"{len(hits)} hit(s)" + (" (first 500)" if len(hits) >= 500 else ""))
-        if hits:
-            st.dataframe(pd.DataFrame([{"export": h["export"], "database": h["database"], "table": h["table"], "line": h["line"], "row": h["text"]} for h in hits]),
-                         hide_index=True, width="stretch")
-            sel = st.selectbox("Show a hit as a row", ["-"] + [f"{i}: {h['database']}/{h['table']}:{h['line']}" for i, h in enumerate(hits[:200])], key="db_hit")
-            if sel != "-":
-                h = hits[int(sel.split(":", 1)[0])]
-                try:
-                    with open(h["file"], "r", encoding="utf-8-sig", newline="") as f:
-                        hdr = next(csv.reader(f))
-                    cells = next(csv.reader([h["text"]]))
-                    st.dataframe(pd.DataFrame([cells], columns=hdr if len(hdr) == len(cells) else None).T.rename(columns={0: "value"}), width="stretch")
-                except Exception as ex:  # noqa: BLE001
-                    st.code(h["text"])
-                    st.caption(str(ex))
+    # ---- 3. explore, search, SQL
+    st.subheader("3. Explore, search and export the tables")
+    from gumshoe.ui.db_explorer import render_explorer
+    render_explorer(case, root, cases_root, _start, _status)
