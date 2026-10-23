@@ -26,6 +26,8 @@ def cmd_profiles(args):
 def _case(args) -> Case:
     cfg = _cfg(args)
     cases_root = Path(args.cases_root)
+    from .settings import apply_llm
+    apply_llm(cfg, cases_root)            # the UI's AI-assistant switch decides over config.yaml
     if not args.case:
         cases = sorted(p.name for p in cases_root.iterdir() if (p / "case.json").exists()) if cases_root.exists() else []
         if len(cases) == 1:
@@ -475,7 +477,7 @@ def cmd_status(args):
         "image_verified": (c.meta.get("image_hashes") or {}).get("match"),
         "readonly": (c.meta.get("readonly_check") or {}).get("ok"),
         "findings": s.get("total"), "by_severity": s.get("by_severity"),
-        "index": c.index_db.exists(), "ollama": ol.available(), "models": ol.models()[:10],
+        "index": c.index_db.exists(), "ai_assistant": ol.state()["label"], "ollama": ol.available(), "models": ol.models()[:10],
         "custody": c.custody.verify()[3],
     }
     print(json.dumps(st, indent=2))

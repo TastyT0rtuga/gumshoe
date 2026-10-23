@@ -59,7 +59,8 @@ def translate_findings(case, finding_ids: Optional[list[str]] = None, all_non_la
             todo.append((d, text))
     done, skipped = [], []
     if not client.available():
-        return {"translated": 0, "skipped": len(todo), "note": "model unavailable; nothing translated"}
+        return {"translated": 0, "skipped": len(todo), "note": ("the AI assistant is off; nothing translated (turn it on in the sidebar to translate)"
+                                                              if not client.enabled else "model unavailable; nothing translated")}
     for d, text in todo:
         if not text.strip():
             skipped.append(d["id"])

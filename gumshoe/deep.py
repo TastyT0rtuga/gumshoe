@@ -93,6 +93,8 @@ def run(case_dir: Path, cfg: dict[str, Any], skip_tools: bool = False, no_vector
     if client.available():
         client.unload("interactive"); client.unload("report")
         say("models unloaded for the tool phase")
+    elif not client.enabled:
+        say("AI assistant off: the run does every tool, the index and the reports; no vectors, translations or narrative")
     from .collect import run_tools, normalize_all
     from .index import build as build_index
     from .translate import translate_findings
@@ -105,9 +107,10 @@ def run(case_dir: Path, cfg: dict[str, Any], skip_tools: bool = False, no_vector
     stage("normalize + documents + webapp + correlate", lambda: normalize_all(case, log=say))
     stage("index" + (" + vectors" if dcfg["llm"]["use_embeddings"] else ""),
           lambda: build_index(case, log=say, with_vectors=dcfg["llm"]["use_embeddings"] and client.available(), client=client))
-    if (dcfg.get("_deep") or {}).get("translate_all"):
+    if (dcfg.get("_deep") or {}).get("translate_all") and client.available():
         stage("translate all non-Latin findings (7B)", lambda: translate_findings(case, all_non_latin=True, tier="report", client=client, log=say))
-    stage("report (deterministic + 7B narrative)", lambda: build_report(case, kind="triage", with_llm=dcfg["report"]["include_llm_narrative"], log=say))
+    stage("report (deterministic" + (" + 7B narrative)" if client.available() else ")"),
+          lambda: build_report(case, kind="triage", with_llm=dcfg["report"]["include_llm_narrative"] and client.available(), log=say))
     stage("report: trends + ioc", lambda: (build_report(case, kind="trends", with_llm=False, log=say), build_report(case, kind="ioc", with_llm=False, log=say)))
     stage("verify archive + custody", lambda: (verify_archive(case), case.custody.verify()))
     if client.available():

@@ -20,6 +20,7 @@ DEFAULTS: dict[str, str] = {
     "work": "",                      # extracted images/trees; '' = inside the distro (/opt/dfir)
     "exports": r"C:\DFIR\exports",   # findings exports are copied here (Windows)
     "examiner": "",
+    "llm": "",                       # "on" / "off" from the UI switch; "" = whatever config.yaml says
 }
 DISTRO_WORK = Path("/opt/dfir")
 
@@ -46,6 +47,17 @@ def save(cases_root: Path, values: dict[str, Any]) -> Path:
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(d, indent=2), "utf-8")
     return p
+
+
+def apply_llm(cfg: dict[str, Any], cases_root) -> dict[str, Any]:
+    """The UI switch (saved beside the cases) decides over config.yaml's llm.enabled; returns cfg."""
+    try:
+        v = load(Path(cases_root)).get("llm", "")
+    except Exception:  # noqa: BLE001
+        v = ""
+    if v in ("on", "off"):
+        cfg.setdefault("llm", {})["enabled"] = (v == "on")
+    return cfg
 
 
 def hopper_dir(cases_root: Path) -> tuple[Path, str]:

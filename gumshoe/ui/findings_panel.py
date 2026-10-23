@@ -182,7 +182,9 @@ def _render_one(case, f: dict, rev: dict, show_preview):
         if b2.button(("Unpin" if pinned_now else "Pin") + " for Ask", key="pin_" + f["id"], help="pinned findings are always offered to the model as sources"):
             set_pin(case, f["id"], pinned=not pinned_now)
             st.rerun()
-        if any(t in (f.get("tags") or []) for t in ("cyrillic", "cjk", "arabic")) and b3.button("Translate to English (7B)", key="tr_" + f["id"]):
+        if any(t in (f.get("tags") or []) for t in ("cyrillic", "cjk", "arabic")) and not case.cfg["llm"].get("enabled"):
+            b3.caption("translation needs the AI assistant (sidebar switch)")
+        elif any(t in (f.get("tags") or []) for t in ("cyrillic", "cjk", "arabic")) and b3.button("Translate to English (7B)", key="tr_" + f["id"]):
             from gumshoe.translate import translate_findings
             with st.spinner("translating..."):
                 res = translate_findings(case, finding_ids=[f["id"]])

@@ -20,7 +20,7 @@ STEPS = {
                 lambda c: ["verify", "--hash-image"]),
     "collect": ("Collect", "run every enabled tool and normalize (hours on a large image; safe to leave)",
                 lambda c: ["collect", "--db"]),
-    "deep":    ("Deep (walk-away)", "every tool, every document, vectors, translations, 7B report (overnight)",
+    "deep":    ("Deep (walk-away)", "every tool, every document, the index and the reports; with the AI assistant on also vectors, translations and the 7B narrative (overnight)",
                 lambda c: ["deep"]),
     "reanalyze": ("Re-analyze", "redo the database review and the analysis of what Collect already gathered, without re-running the tools (minutes)",
                 lambda c: ["collect", "--normalize-only", "--db"]),

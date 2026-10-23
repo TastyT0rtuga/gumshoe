@@ -5,8 +5,9 @@
 ![license](https://img.shields.io/badge/license-Apache--2.0-green)
 
 > **Not an official product of any government agency or employer.** Gumshoe is an examiner's aid:
-> established forensic tools make the findings, a local model only searches and drafts over them
-> with mandatory citations, and the examiner verifies everything. See [NOTICE](NOTICE).
+> established forensic tools and deterministic parsers make the findings; a local model is an **optional
+> switch, off by default**, that only searches and drafts over them with mandatory citations; the examiner
+> verifies everything. See [NOTICE](NOTICE).
 
 **At a glance:** fully offline · runs on a 16 GB CPU-only workstation · evidence stays read-only ·
 every finding cites a path, line and SHA-256 · hash-chained custody log · view and export any file ·
@@ -19,7 +20,7 @@ every site are built on, scored with the evidence.
 ```bash
 git clone https://github.com/<you>/gumshoe && cd gumshoe
 pip install -r requirements.txt
-python gumshoe.py selftest          # 53 checks, no model or evidence needed
+python gumshoe.py selftest          # 55 checks, no model or evidence needed
 python gumshoe.py --help
 ```
 
@@ -135,7 +136,26 @@ artifact behind a high/critical finding, is copied to `evidence/` with a sidecar
 record to the previous one; `gumshoe custody` detects any edit. AI narrative in reports
 is labelled, cited, logged, and separate from the findings tables.
 
-## Models (Ollama on Windows, pinned to P-cores)
+## The AI assistant: a switch, off by default
+
+Nothing in the evidence depends on a model. Intake, mounting, collection, findings, databases to CSV, Players,
+fingerprint, timeline, custody and the reports are deterministic and run without one; `llm.enabled: false` is
+the default in `config.yaml`, and the sidebar switch (saved beside the cases) overrides it per machine. The
+switch sits next to a panel that says what the model unlocks, so turning it on is an informed choice:
+
+| With the model | Without it |
+| --- | --- |
+| **Ask** - questions in plain language over everything indexed; every answer cites its sources, claims without a citation are removed | **Find** - the same search over the same index with the same citations, no generated text |
+| **Report narrative** - labelled drafting sections written from the cited findings (7B) | the report of findings, tables, timeline and custody, with no generated text (its header says so) |
+| **Translation** - Russian/Chinese/Arabic findings to English, labelled as machine translation | non-Latin findings tagged by script and shown as they are |
+| **Deep profile** - the walk-away run adds translations and the narrative | the walk-away run does every tool, the index and the reports |
+| **Semantic search** - vectors so Ask/Find also match paraphrases | keyword search (FTS5) |
+
+A bundle can be built without Ollama and without the models (`01_prepare_online.ps1 -Lite`, about 6 GB
+smaller); the launcher and the first run then install everything else and the switch stays off until the
+`ollama\` and `models\` folders are added.
+
+### Models (Ollama on Windows, pinned to P-cores)
 
 | Tier | Default | Use |
 | --- | --- | --- |
@@ -144,6 +164,13 @@ is labelled, cited, logged, and separate from the findings tables.
 | embed (optional) | `nomic-embed-text` | `gumshoe index --vectors` (slow on CPU; run once) |
 
 Change tags in `config.yaml`. Keep one model loaded at a time (`OLLAMA_MAX_LOADED_MODELS=1`).
+
+**A stronger model on a stronger machine** is the same three lines: pull it on the prep machine
+(`01_prepare_online.ps1 -Models qwen2.5:14b-instruct-q4_K_M,...` puts it in the bundle's model store), name
+it under `llm.models`, raise `num_ctx_interactive` / `num_ctx_report` (4k/8k were chosen for 16 GB with no
+GPU) and `num_thread`. Ollama uses a GPU on its own when one is present. Only a change of the `embed` model
+needs work - the vectors must be rebuilt (`gumshoe index --vectors`). The citation guard and every
+deterministic layer are unchanged whatever the model.
 
 ## Two speeds: at the keyboard vs. walked away
 
@@ -272,8 +299,8 @@ correlation passes shrink accordingly (the skipped line counts are recorded).
 
 `setup/offline/` turns the repository into a single folder that installs and runs Gumshoe on an air-gapped
 Windows 11 machine with no network at any point: copy it over, double-click `Gumshoe.bat`. It carries
-Ollama and the models, WSL and a pristine Ubuntu rootfs, the full offline package set, the Python wheels and
-every tool. [docs/OFFLINE-BUNDLE.md](docs/OFFLINE-BUNDLE.md) describes the layout, how it was built and
+WSL and a pristine Ubuntu rootfs, the full offline package set, the Python wheels and every tool, and - in the
+full variant - Ollama and the models (a lite bundle leaves those out; the AI assistant then stays off). [docs/OFFLINE-BUNDLE.md](docs/OFFLINE-BUNDLE.md) describes the layout, how it was built and
 how it is verified on the sandbox.
 
 ## Validation

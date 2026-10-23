@@ -23,6 +23,8 @@ ap.add_argument("--config", default=str(ROOT / "config.yaml"))
 args, _ = ap.parse_known_args()
 CFG = load_config(args.config or None)
 CASES = Path(args.cases_root)
+from gumshoe.settings import apply_llm, load as load_settings, save as save_settings  # noqa: E402
+apply_llm(CFG, CASES)                   # the sidebar switch (saved beside the cases) decides over config.yaml
 
 st.set_page_config(page_title="Gumshoe", layout="wide")
 st.title("Gumshoe — cited forensic triage")
@@ -52,7 +54,26 @@ with st.sidebar:
     ro = case.meta.get("readonly_check") or {}
     st.markdown("**Read-only:** " + ("✅ " if ro.get("ok") else "⚠️ ") + str(ro.get("reason", "not checked")))
     st.markdown(f"**Custody:** {'✅' if ok_chain else '❌'} {chain_msg}")
-    st.markdown(f"**Model:** {'✅ reachable' if ol.available() else '⚠️ Ollama not reachable'}")
+    # ---- the AI assistant: a switch, and what it unlocks. Off by default; nothing in the evidence depends on it.
+    from gumshoe.llm import UNLOCKS
+    lstate = ol.state()
+    new_on = st.toggle("AI assistant (local model)", value=lstate["enabled"], key="llm_switch",
+                       help="Off: every finding, table, player, fingerprint, timeline and report is produced without a model. "
+                            "On: a local model adds the items listed below. Saved for this machine (gumshoe-settings.json).")
+    if new_on != lstate["enabled"]:
+        save_settings(CASES, {"llm": "on" if new_on else "off"})
+        st.rerun()
+    st.caption(("🟢 " if lstate["enabled"] and lstate["reachable"] and not lstate["missing"] else "🟡 " if lstate["enabled"] else "⚪ ") + lstate["label"])
+    with st.expander("what the model unlocks" if not lstate["enabled"] else "what the model adds (and what works without it)"):
+        for u in UNLOCKS:
+            if lstate["enabled"] and lstate["reachable"]:
+                st.markdown(f"**{u['name']}** - ready: {u['with']}")
+            elif lstate["enabled"]:
+                st.markdown(f"**{u['name']}** - needs the model (not reachable): {u['with']}  \n*now:* {u['without']}")
+            else:
+                st.markdown(f"**{u['name']}** - off → {u['without']}  \n*with the model:* {u['with']}")
+        st.caption("A stronger model is a matter of putting it in the bundle's model store and naming it in config.yaml (llm.models); "
+                   "the citation guard and the deterministic layers do not change.")
     render_sidebar_status(case)
     st.markdown(f"**Findings:** {summary.get('total', 0)}")
     for s in reversed(SEVERITIES):
@@ -124,8 +145,12 @@ with tabs[3]:
     render_findings_tab(case, findings, show_preview, CASES)
 
 with tabs[4]:
-    st.caption("Answers come only from indexed sources and must cite them; citations outside the retrieved set are removed. "
-               "Cited files are archived automatically.")
+    if ol.enabled:
+        st.caption("Answers come only from indexed sources and must cite them; citations outside the retrieved set are removed. "
+                   "Cited files are archived automatically.")
+    else:
+        st.caption("**Find** - the AI assistant is off: the same search over the same index returns the matching sources with their "
+                   "citations and nothing generated. Turn the assistant on in the sidebar to ask in plain language.")
     from gumshoe.memory import read_session, clear_session, list_sessions, read_notes
     cs1, cs2, cs3 = st.columns([2, 1, 1])
     session = cs1.text_input("Session (follow-ups carry earlier turns and their cited sources)", st.session_state.get("ask_session", "work"))
@@ -140,18 +165,20 @@ with tabs[4]:
         with st.expander(f"session '{session}': last {len(turns)} turn(s)"):
             for t in turns:
                 st.markdown(f"**Q:** {t['question']}  \n**A:** {(t.get('answer') or '(no answer)')[:600]}")
-    q = st.text_area("Question", placeholder="Which addresses posted to files that Loki flagged, and when?")
-    tier = st.radio("Model", ["fast (3B)", "deep (7B)"], horizontal=True)
-    if st.button("Ask") and q.strip():
+    q = st.text_area("Question" if ol.enabled else "Find (words, names, addresses, paths)", placeholder="Which addresses posted to files that Loki flagged, and when?" if ol.enabled else "wallet OR pay*; ivan.petrov; /www/wwwroot/x/upload.php")
+    tier = st.radio("Model", ["fast (3B)", "deep (7B)"], horizontal=True) if ol.enabled else "fast (3B)"
+    if st.button("Ask" if ol.enabled else "Find") and q.strip():
         from gumshoe.rag import ask
         with st.spinner("retrieving and generating..."):
             r = ask(case, q.strip(), tier="report" if tier.startswith("deep") else "interactive", session=session or None, use_memory=use_memory)
         if r.get("answer"):
             st.markdown(("✅ supported" if r["supported"] else "⚠️ unsupported in part") + f" · model {r['model']}")
             st.markdown(r["answer"])
+        elif not ol.enabled:
+            st.info(f"{len(r.get('sources') or [])} matching source(s) below (no generated text: the AI assistant is off)")
         else:
             st.warning(r.get("note", "no answer"))
-        st.markdown("**Sources** — every excerpt the model was given; cited ones are marked")
+        st.markdown("**Sources** — every excerpt the model was given; cited ones are marked" if ol.enabled else "**Sources** — the excerpts that match")
         st.session_state["last_answer"] = r
         if r.get("archived"):
             st.caption("archived: " + ", ".join(r["archived"]))
@@ -395,7 +422,10 @@ with tabs[9]:
 
 with tabs[10]:
     kind = st.selectbox("Report", ["triage", "trends", "ioc"])
-    use_llm = st.checkbox("Include AI narrative sections (labelled, cited, 7B model)", value=False)
+    use_llm = st.checkbox("Include AI narrative sections (labelled, cited, 7B model)", value=False, disabled=not ol.enabled,
+                          help=None if ol.enabled else "the AI assistant is off (sidebar switch); the report is produced without generated text")
+    if not ol.enabled:
+        st.caption("AI assistant off: the report carries findings, tables, timeline and custody only, and says so in its header.")
     if st.button("Generate"):
         from gumshoe.report import build
         with st.spinner("building report..."):

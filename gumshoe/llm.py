@@ -13,11 +13,54 @@ class LLMUnavailable(RuntimeError):
     pass
 
 
+OFF_NOTE = "the AI assistant is off (sidebar switch, or llm.enabled in config.yaml); nothing in the evidence depends on it"
+
+# what the model unlocks - shown next to the switch, so turning it on or off is an informed choice
+UNLOCKS = [
+    {"name": "Ask", "with": "questions in plain language over everything indexed; every answer cites its sources and claims without a citation are removed",
+     "without": "Find: the same search over the same index with the same citations, no generated text"},
+    {"name": "Report narrative", "with": "labelled drafting sections in the triage report, written from the cited findings (7B model)",
+     "without": "the report of findings, tables, timeline and custody, with no generated text"},
+    {"name": "Translation", "with": "Russian, Chinese and Arabic findings translated to English, labelled as machine translation (7B model)",
+     "without": "non-Latin findings are tagged by script and shown as they are"},
+    {"name": "Deep profile", "with": "the walk-away run adds translations and the narrative report at the end",
+     "without": "the walk-away run does every tool, the index and the report without generated text"},
+    {"name": "Semantic search", "with": "vectors (embeddings) so Ask/Find also match paraphrases",
+     "without": "keyword search (full-text index)"},
+]
+
+
 class Ollama:
     def __init__(self, cfg: dict[str, Any]):
         self.cfg = cfg
         self.base = (os.environ.get("GUMSHOE_OLLAMA") or cfg.get("base_url") or "http://127.0.0.1:11434").rstrip("/")
         self.timeout = int(cfg.get("timeout_s", 900))
+        self.enabled = bool(cfg.get("enabled", False))       # the switch: off means no call is ever made
+
+    def reachable(self) -> bool:
+        """Is an Ollama answering at base_url - regardless of the switch (the sidebar says 'installed but off')."""
+        try:
+            req = urllib.request.Request(self.base + "/api/tags")
+            with urllib.request.urlopen(req, timeout=5) as r:
+                return r.status == 200
+        except Exception:
+            return False
+
+    def state(self) -> dict[str, Any]:
+        """{'enabled', 'reachable', 'models', 'missing', 'label'} for the UI and `gumshoe status`."""
+        reach = self.reachable()
+        have = self.models() if reach else []
+        want = [m for m in (self.cfg.get("models") or {}).values() if m]
+        missing = [m for m in want if m and not any(h == m or h.split(":")[0] == m.split(":")[0] and h.startswith(m) for h in have)]
+        if not self.enabled:
+            label = "off" + (" (a model is installed and reachable; turn the switch on to use it)" if reach else "")
+        elif not reach:
+            label = "on, but no model is reachable at " + self.base + " (lite bundle, or Ollama not running)"
+        elif missing:
+            label = "on; reachable, but these models are missing: " + ", ".join(missing)
+        else:
+            label = "on; " + ", ".join(have[:4])
+        return {"enabled": self.enabled, "reachable": reach, "models": have, "missing": missing, "label": label}
 
     def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         data = json.dumps(body).encode("utf-8")
@@ -29,12 +72,8 @@ class Ollama:
             raise LLMUnavailable(f"Ollama at {self.base}: {e}") from e
 
     def available(self) -> bool:
-        try:
-            req = urllib.request.Request(self.base + "/api/tags")
-            with urllib.request.urlopen(req, timeout=5) as r:
-                return r.status == 200
-        except Exception:
-            return False
+        """Usable: the switch is on and an Ollama answers."""
+        return self.enabled and self.reachable()
 
     def models(self) -> list[str]:
         try:
@@ -49,6 +88,8 @@ class Ollama:
 
     def generate(self, prompt: str, system: str = "", tier: str = "interactive", num_ctx: Optional[int] = None,
                  temperature: Optional[float] = None, keep_alive: Optional[str] = None) -> dict[str, Any]:
+        if not self.enabled:
+            raise LLMUnavailable(OFF_NOTE)
         model = self.model_for(tier)
         ctx = num_ctx or (self.cfg.get("num_ctx_report") if tier == "report" else self.cfg.get("num_ctx_interactive")) or 4096
         body = {
@@ -68,5 +109,7 @@ class Ollama:
             pass
 
     def embed(self, text: str) -> list[float]:
+        if not self.enabled:
+            raise LLMUnavailable(OFF_NOTE)
         out = self._post("/api/embeddings", {"model": self.cfg["models"].get("embed", "nomic-embed-text"), "prompt": text})
         return out.get("embedding") or []

@@ -94,7 +94,10 @@ def build(case, kind: str = "triage", with_llm: Optional[bool] = None, log=print
     manifest = json.loads((case.evidence / "manifest.json").read_text("utf-8")) if (case.evidence / "manifest.json").exists() else {"items": {}}
     use_llm = cfg["report"]["include_llm_narrative"] if with_llm is None else with_llm
     client = Ollama(cfg["llm"]) if use_llm else None
-    if client and not client.available():
+    if client and not client.enabled:
+        log("[report] the AI assistant is off; narrative sections skipped")
+        client = None
+    elif client and not client.available():
         log("[report] model not reachable; narrative sections skipped")
         client = None
     meta = case.meta
@@ -121,6 +124,8 @@ def build(case, kind: str = "triage", with_llm: Optional[bool] = None, log=print
                 ["Evidence verified", "yes" if ih.get("match") is True else "NO"],
                 ["Read-only verification", meta.get("readonly_check", {}).get("reason", "not run") if isinstance(meta.get("readonly_check"), dict) else "not run"],
                 ["Custody chain", chain_msg],
+                ["AI assistant", ("on - narrative sections below are labelled and were written by " + client.model_for("report")) if client else
+                 "off - this report contains no generated text"],
                 ["Custody head at report time", "record %d, hash %s" % case.custody.head()]]
         parts.append("## 1. Case information\n\n" + _table(["Item", "Value"], rows) + "\n")
         parts.append("## 2. Scope and objectives\n\n" + (meta.get("notes") or "_Enter scope in case notes (`gumshoe init --notes`)._") + "\n")

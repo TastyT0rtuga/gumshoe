@@ -41,10 +41,14 @@ Write-Host "  install: $Dest   distro: $WslName"
 if ($Bundle -match '\s') { Fail "the bundle path contains a space. Move the Gumshoe-offline folder to a path without spaces (e.g. E:\Gumshoe-offline) and run again."; Leave 2 }
 $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $admin) { Fail "administrator rights are required (Gumshoe.bat asks for them)"; Leave 2 }
-foreach ($need in "ollama\OllamaSetup.exe", "wsl\wsl.msi", "wsl\rootfs.tar.gz", "models\blobs", "debs", "wheels\linux", "gumshoe\setup\offline\wsl_provision.sh") {
+foreach ($need in "wsl\wsl.msi", "wsl\rootfs.tar.gz", "debs", "wheels\linux", "gumshoe\setup\offline\wsl_provision.sh") {
   if (-not (Test-Path (Join-Path $Bundle $need))) { Fail "bundle is incomplete: missing $need" }
 }
 if (-not $ok) { Leave 2 }
+# a lite bundle carries no Ollama and no models: the AI assistant (a switch inside Gumshoe, off by default) stays
+# unavailable until those folders are added; everything else installs and runs the same
+$Lite = -not ((Test-Path (Join-Path $Bundle "ollama\OllamaSetup.exe")) -and (Test-Path (Join-Path $Bundle "models\blobs")))
+if ($Lite) { Write-Host "  lite bundle (no ollama\ or models\): installing without the AI assistant" } else { Write-Host "  full bundle (Ollama + models included)" }
 
 # ---- 1. verify ------------------------------------------------------------------------------------
 if (-not $SkipVerify) {
@@ -61,14 +65,18 @@ if (-not $SkipVerify) {
     if ($bad -eq 0) { Write-Ok "$n manifest entries match" } else { Fail "$bad of $n manifest entries do not match" }
   } else { Write-Warn2 "no SHA256SUMS.txt in the bundle; skipping manifest check" }
   # model blobs are named after their own SHA-256
-  $bn = 0; $bbad = 0
-  foreach ($b in Get-ChildItem (Join-Path $Bundle "models\blobs") -File) {
-    if ($b.Name -notmatch '^sha256-([0-9a-f]{64})$') { continue }
-    $bn++; if ((Get-FileHash -Algorithm SHA256 $b.FullName).Hash.ToLower() -ne $Matches[1]) { Write-Warn2 "model blob corrupt: $($b.Name)"; $bbad++ }
+  if (-not $Lite) {
+    $bn = 0; $bbad = 0
+    foreach ($b in Get-ChildItem (Join-Path $Bundle "models\blobs") -File) {
+      if ($b.Name -notmatch '^sha256-([0-9a-f]{64})$') { continue }
+      $bn++; if ((Get-FileHash -Algorithm SHA256 $b.FullName).Hash.ToLower() -ne $Matches[1]) { Write-Warn2 "model blob corrupt: $($b.Name)"; $bbad++ }
+    }
+    if ($bbad -eq 0) { Write-Ok "$bn model blobs match their digests" } else { Fail "$bbad model blobs are corrupt; copy the bundle again" }
   }
-  if ($bbad -eq 0) { Write-Ok "$bn model blobs match their digests" } else { Fail "$bbad model blobs are corrupt; copy the bundle again" }
-  # the two installers are Authenticode-signed; the chain is embedded so this works offline
-  foreach ($inst in @(@{f = "ollama\OllamaSetup.exe"; who = "Ollama"}, @{f = "wsl\wsl.msi"; who = "Microsoft"})) {
+  # the installers are Authenticode-signed; the chain is embedded so this works offline
+  $insts = @(@{f = "wsl\wsl.msi"; who = "Microsoft"})
+  if (-not $Lite) { $insts += @{f = "ollama\OllamaSetup.exe"; who = "Ollama"} }
+  foreach ($inst in $insts) {
     $sig = Get-AuthenticodeSignature (Join-Path $Bundle $inst.f)
     $subj = if ($sig.SignerCertificate) { $sig.SignerCertificate.Subject } else { "(unsigned)" }
     if ($sig.Status -eq "Valid" -and $subj -match $inst.who) { Write-Ok "$($inst.f) signed by $subj" }
@@ -78,7 +86,12 @@ if (-not $SkipVerify) {
 }
 
 # ---- 2. Ollama + models ---------------------------------------------------------------------------
-Write-Step "2/6 Ollama and the model store"
+Write-Step "2/6 Ollama and the model store (the optional AI assistant)"
+$OllamaPort = 0
+if ($Lite) {
+  Write-Host "  skipped: lite bundle. Gumshoe's AI assistant switch stays off; add the full bundle's ollama\ and models\ folders and"
+  Write-Host "  double-click Gumshoe.bat again to install them later."
+} else {
 $justInstalled = $false
 if (-not (Get-OllamaExe)) {
   Write-Host "  installing Ollama silently..."
@@ -119,8 +132,9 @@ try {
   }
 } catch { Write-Warn2 "could not add the Hyper-V firewall rule: $($_.Exception.Message)" }
 $OllamaPort = Start-OllamaForGumshoe $Bundle
-if ($OllamaPort -eq 0) { Fail "no Ollama with the bundled models could be started" }
+if ($OllamaPort -eq 0) { Write-Warn2 "no Ollama with the bundled models could be started; Gumshoe will run without the AI assistant (Gumshoe.bat tries again at every start)" }
 else { Write-Ok ("models visible on port ${OllamaPort}: " + ((Get-OllamaModels $OllamaPort) -join ", ")) }
+}
 
 # ---- 3. WSL ----------------------------------------------------------------------------------------
 Write-Step "3/6 WSL"

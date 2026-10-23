@@ -23,8 +23,10 @@ param(
   [string[]]$Models = @("qwen2.5:3b-instruct", "qwen2.5:7b-instruct-q4_K_M", "nomic-embed-text"),
   [string]$UbuntuDistro = "Ubuntu-24.04",
   [switch]$SkipWsl,
-  [switch]$SkipModels
+  [switch]$SkipModels,
+  [switch]$Lite          # a bundle without Ollama and without models (about 6 GB smaller): the AI assistant stays off
 )
+if ($Lite) { $SkipModels = $true }
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 $Out = [System.IO.Path]::GetFullPath($Out)
@@ -47,7 +49,7 @@ function Download($url, $dest) {
   Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing
 }
 
-foreach ($d in "gumshoe", "wheels\win", "wheels\linux", "ollama", "models", "wsl", "tools\uac", "tools\loki", "tools\chainsaw", "tools\sigma", "tools\arsenal") {
+foreach ($d in (@("gumshoe", "wheels\win", "wheels\linux", "wsl", "tools\uac", "tools\loki", "tools\chainsaw", "tools\sigma", "tools\arsenal") + $(if ($Lite) { @() } else { @("ollama", "models") }))) {
   New-Item -ItemType Directory -Force -Path (Join-Path $Out $d) | Out-Null
 }
 
@@ -68,9 +70,11 @@ Step "Python wheels for Windows ($PyVersion win_amd64) and WSL (manylinux)" {
   } else { Write-Host "  (Loki not fetched yet; re-run after the Loki step to get its wheels)" }
 }
 
-Step "Ollama installer" {
-  Download "https://ollama.com/download/OllamaSetup.exe" (Join-Path $Out "ollama\OllamaSetup.exe")
-}
+if (-not $Lite) {
+  Step "Ollama installer" {
+    Download "https://ollama.com/download/OllamaSetup.exe" (Join-Path $Out "ollama\OllamaSetup.exe")
+  }
+} else { Write-Host "== lite bundle: no Ollama installer, no models (the AI assistant switch in Gumshoe stays off)" }
 
 if (-not $SkipModels) {
   Step "Pull models and copy the model store" {

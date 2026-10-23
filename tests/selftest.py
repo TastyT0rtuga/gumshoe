@@ -367,8 +367,12 @@ def run_selftest(verbose: bool = True) -> bool:
               f"{[(h['relpath'].rsplit('/', 1)[-1], h.get('encoding')) for h in ru_hits]}")
         from gumshoe.translate import translate_findings
         os.environ["GUMSHOE_OLLAMA"] = "http://127.0.0.1:9"
+        case.cfg["llm"]["enabled"] = False
         tr = translate_findings(case, all_non_latin=True)
-        check("translate degrades cleanly without a model", tr.get("translated") == 0 and "unavailable" in tr.get("note", ""))
+        check("translate refuses cleanly while the AI assistant is off", tr.get("translated") == 0 and "off" in tr.get("note", ""), tr.get("note", ""))
+        case.cfg["llm"]["enabled"] = True
+        tr = translate_findings(case, all_non_latin=True)
+        check("translate degrades cleanly without a reachable model", tr.get("translated") == 0 and "unavailable" in tr.get("note", ""))
         # documents: inventory, extraction, citation by original path, viewing, export
         doc = case.read_json("documents.json", {}) or {}
         kinds = doc.get("by_kind", {})
@@ -468,9 +472,14 @@ def run_selftest(verbose: bool = True) -> bool:
         check("citation guard keeps [1][2], removes [7]", valid == [1, 2] and invalid == [7] and "[7]" not in cleaned and "[1]" in cleaned)
         # 5. ask without a model -> sources only, nothing fabricated
         os.environ["GUMSHOE_OLLAMA"] = "http://127.0.0.1:9"  # closed port: model unavailable
+        case.cfg["llm"]["enabled"] = True
         r = ask(case, "What scheduled tasks exist on this server?", k=4)
         check("ask() degrades to retrieved sources when the model is unreachable",
               r["answer"] is None and len(r["sources"]) > 0 and "unavailable" in (r.get("note") or ""), r.get("note", ""))
+        case.cfg["llm"]["enabled"] = False
+        r = ask(case, "What scheduled tasks exist on this server?", k=4)
+        check("ask() is Find while the AI assistant is off: sources with citations, no call, no answer",
+              r["answer"] is None and len(r["sources"]) > 0 and "off" in (r.get("note") or ""), r.get("note", ""))
         # 6. archive-on-cite
         sc = archive(case, "/www/wwwroot/example.local/readme.txt", "selftest", "F-TEST", 1, 1)
         check("archive copies the artifact and verifies the hash", bool(sc) and sc["copies"][0]["verified"] is True)

@@ -25,10 +25,18 @@ if (-not (Test-Path $installed)) {
   }
 }
 
-Write-Step "Ollama"
-$OllamaPort = Start-OllamaForGumshoe $Bundle
-if ($OllamaPort -eq 0) { Write-Host "Cannot continue without an Ollama that has the bundled models. See $Dest\first-run.log" -ForegroundColor Red; exit 1 }
-Write-Host ("  models on port ${OllamaPort}: " + ((Get-OllamaModels $OllamaPort) -join ", "))
+Write-Step "AI assistant (optional)"
+# The model is a switch inside Gumshoe (off by default); the tool runs fully without it. A lite bundle has no
+# ollama\ and no models\ folder; a full bundle starts Ollama here so the switch can be turned on in the UI.
+$OllamaPort = 0
+if ((Test-Path (Join-Path $Bundle "ollama\OllamaSetup.exe")) -or (Get-OllamaExe)) {
+  $OllamaPort = Start-OllamaForGumshoe $Bundle
+  if ($OllamaPort -eq 0) { Write-Warn2 "no Ollama with the bundled models could be started; Gumshoe runs without the AI assistant (see $Dest\first-run.log)" }
+  else { Write-Host ("  models on port ${OllamaPort}: " + ((Get-OllamaModels $OllamaPort) -join ", ")); Write-Host "  (the assistant stays off until the switch in the UI's sidebar is turned on)" }
+} else {
+  Write-Host "  lite bundle: no Ollama and no models here. Every finding, table, player and report is produced without them;"
+  Write-Host "  add the full bundle's ollama\ and models\ folders later to unlock Ask, narrative sections and translation."
+}
 
 Write-Step "WSL distro $WslName"
 if (-not (Test-WslDistro $WslName)) { Write-Host "distro $WslName is missing; delete $installed and double-click Gumshoe.bat to reinstall" -ForegroundColor Red; exit 1 }
@@ -59,7 +67,7 @@ else { Write-Ok "project in the distro matches the bundle" }
 & wsl.exe -d $WslName -u root -- bash /opt/dfir/gumshoe/setup/offline/wsl_update.sh "$bwsl"
 if (-not (Test-Path "C:\DFIR\hopper")) { New-Item -ItemType Directory -Force -Path "C:\DFIR\hopper" | Out-Null }
 # can the distro reach Ollama? mirrored networking -> 127.0.0.1; NAT -> the Windows host address
-[void](Ensure-OllamaFromWsl $WslName $OllamaPort)
+if ($OllamaPort -gt 0) { [void](Ensure-OllamaFromWsl $WslName $OllamaPort) }
 
 if ($Selftest) {
   Write-Step "self-test"

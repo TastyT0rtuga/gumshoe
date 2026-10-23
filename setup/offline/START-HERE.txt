@@ -6,14 +6,19 @@ Everything Gumshoe needs is in this folder. Nothing here uses the network.
   1. Copy the whole Gumshoe-offline folder onto the sandbox (any drive, e.g. C:\Gumshoe-offline).
      - the path must not contain spaces
      - the drive must be exFAT or NTFS (one model file is 4.7 GB; FAT32 cannot hold it)
-     - you need about 12 GB for the folder plus 12 GB for the installation (C:\DFIR and the model store)
+     - you need about 12 GB for the folder plus 12 GB for the installation (C:\DFIR and the model store);
+       a lite bundle (no models) needs about 6 GB plus 6 GB
 
   2. Double-click  Gumshoe.bat
      The first run installs everything (10-20 minutes). Windows asks for administrator approval once.
      If it says REBOOT NEEDED (only when WSL was not on the machine yet): reboot, then double-click
      Gumshoe.bat again and it continues where it stopped.
 
-  3. From then on, Gumshoe.bat starts the model server and opens http://localhost:8501 in your browser.
+  3. From then on, Gumshoe.bat opens http://localhost:8501 in your browser (and, in a full bundle, starts the
+     model server). The AI assistant is a switch in the sidebar, OFF by default: every finding, table, player
+     and report is produced without it. The panel under the switch says what turning it on unlocks (Ask in
+     plain language, labelled narrative sections, translation). A "lite" bundle has no ollama\ and models\
+     folders; it installs and runs everything else, and the switch stays off until they are added.
      Keep the minimized window titled "Gumshoe UI - keep this window open" open while you work; closing
      it stops Gumshoe AND the distro (so also any intake or Collect that is running). If the browser ever
      shows Streamlit's "Connection error ... streamlit run yourscript.py" dialog, ignore that command (it is

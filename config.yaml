@@ -26,6 +26,12 @@ tools:
   clamav:   {enabled: false, bin: clamscan}   # off by default: ~2 GB of signatures in RAM; never alongside a model
 
 llm:
+  # The AI assistant is a switch. Off (the default): every finding, table, player, fingerprint, timeline and report
+  # is produced without a model - nothing in the evidence depends on one. On: a local model (Ollama) unlocks Ask in
+  # plain language (cited answers), labelled narrative sections in the report, translation of Russian/Chinese/Arabic
+  # findings, deep-profile summaries and semantic search. The sidebar switch in the UI overrides this line
+  # (saved next to the cases in gumshoe-settings.json). A bigger model is just other names below.
+  enabled: false
   base_url: http://127.0.0.1:11434   # from WSL with mirrored networking this reaches Ollama on Windows;
                                      # otherwise use http://<windows-host-ip>:11434 and set OLLAMA_HOST=0.0.0.0 on Windows
   models:

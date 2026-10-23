@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **The AI assistant is a switch, off by default.** Nothing in the evidence ever depended on the model; now the
+  packaging says so too. `llm.enabled: false` in config.yaml, a sidebar switch (saved beside the cases in
+  `gumshoe-settings.json`) that overrides it per machine, and under it a panel listing what the model unlocks
+  with each item's state - Ask in plain language (off: **Find**, the same search with the same citations and no
+  generated text), labelled narrative sections in the report (off: the report says "no generated text" in its
+  header), translation of Russian/Chinese/Arabic findings, the deep run's translations and narrative, semantic
+  search - and a note that a stronger model is three lines of config. The launcher no longer refuses to run
+  without Ollama; the first run installs a **lite bundle** (no `ollama\`, no `models\`: `01_prepare_online.ps1
+  -Lite`, about 6 GB smaller) and the self-test reports a missing Ollama as "unavailable", not as a failure.
+  `gumshoe status` shows the state. Every model call refuses when the switch is off, so an off machine makes
+  no model call at all.
 - **Second review round (DeepSeek, Gemini) - fixes** (peer-review brief, section 10).
   Dump reader: (1) the string grammar follows the dump's escape mode - `NO_BACKSLASH_ESCAPES`, PostgreSQL, T-SQL and
   SQLite dumps (backslash literal, quotes doubled) are detected from their markers or from the escapes seen and read

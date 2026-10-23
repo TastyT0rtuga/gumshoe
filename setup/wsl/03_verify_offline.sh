@@ -22,11 +22,13 @@ chk "mariadbd"           "command -v mariadbd && command -v mariadb"
 chk "sigma rules"        "test -d $DEST/gumshoe/tools/sigma/rules"
 chk "signature-base"     "test -d $DEST/tools/loki/signature-base/yara"
 
-echo "== Ollama"
+echo "== AI assistant (optional: a switch in Gumshoe, off by default; nothing in the evidence depends on it)"
 URL=$(grep -E '^\s*base_url:' "$DEST/gumshoe/config.yaml" | awk '{print $2}')
-chk "ollama reachable at $URL" "curl -s -m 3 $URL/api/tags"
 if curl -s -m 3 "$URL/api/tags" >/dev/null 2>&1; then
+  echo "  [ OK ] ollama reachable at $URL (the assistant can be turned on in the sidebar)"
   echo "  models:"; curl -s "$URL/api/tags" | "$PY" -c 'import json,sys; [print("   -", m["name"]) for m in json.load(sys.stdin).get("models", [])]'
+else
+  echo "  [ -- ] no Ollama at $URL: the AI assistant is unavailable (lite bundle, or Ollama not running); everything else works"
 fi
 
 if [ "$ONLINE" -eq 1 ]; then

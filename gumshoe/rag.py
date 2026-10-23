@@ -137,7 +137,8 @@ def ask(case, question: str, k: Optional[int] = None, tier: str = "interactive",
         if not valid:
             result["note"] = (result.get("note") or "") + " answer carries no valid citation; treat as unsupported"
     except LLMUnavailable as e:
-        result["note"] = f"model unavailable ({e}); returning retrieved sources only"
+        result["note"] = (f"the AI assistant is off: these are the matching sources, no answer was generated" if not client.enabled
+                          else f"model unavailable ({e}); returning retrieved sources only")
     archived = []
     if do_archive:
         cited = result["valid_citations"] or []

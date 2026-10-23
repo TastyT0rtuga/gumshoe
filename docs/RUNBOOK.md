@@ -22,6 +22,11 @@ Rules that never bend:
 4. Open PowerShell **as Administrator** in `C:\build\gumshoe` and run:
    `powershell -ExecutionPolicy Bypass -File setup\windows\01_prepare_online.ps1 -Out C:\build\gumshoe-transfer`
    You should see `ok:` after each step. `FAILED:` lines are fine to re-run.
+   Add `-Lite` for a bundle **without Ollama and without the models** (about 6 GB smaller): the AI assistant
+   is a switch inside Gumshoe that is off by default and nothing in the evidence depends on it; a lite
+   bundle installs and runs everything else, and the `ollama\` and `models\` folders can be added later.
+   A stronger model for a stronger machine: `-Models qwen2.5:14b-instruct-q4_K_M,nomic-embed-text` (then
+   name it under `llm.models` in `config.yaml` and raise `num_ctx_*`).
 5. Run the same command a **second time** (it picks up Loki's Python requirements after Loki is cloned).
 6. Check the result: `C:\build\gumshoe-transfer` should contain `gumshoe\`, `wheels\win`, `wheels\linux`,
    `ollama\OllamaSetup.exe`, `models\` (7–8 GB), `wsl\wsl.msi`, `wsl\dfir-ubuntu.tar` (~2 GB),
@@ -107,6 +112,12 @@ If that is refused, map it to a drive letter in Windows or copy the item into th
     - `ls` shows nothing or only `lost+found` → wrong partition; `sudo umount /mnt/evidence` and try the other.
 
 ## Phase E — run the case  (collect: 1–4 hours on 50 GB, overnight on 500 GB; the rest minutes)
+
+**The AI assistant is off unless you turn it on** (sidebar switch, saved for the machine). Everything in this
+phase runs without it. The panel under the switch lists what it unlocks - Ask in plain language instead of
+Find, labelled narrative sections in the report, translation of Russian/Chinese findings, the deep run's
+translations and narrative, semantic search - and what each looks like without it. The report header
+records whether it was on.
 
 Big image? Before step 19 set in `config.yaml`: `logs.since` (a month before the earliest known
 indicator), `logs.keep_jsonl: false`, and `dbreview.databases` (the app databases you care about).
