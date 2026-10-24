@@ -231,7 +231,7 @@ if ($m[0] -ne 0) {
   $what = "cases gumshoe-settings.json"
   if ($Everything) { $what += " images trees" }
   Write-Host "  copying $what -> $outWin ..."
-  $c = Invoke-Wsl @("-d", $Rescue, "-u", "root", "--", "sh", "-c", "mkdir -p $outWsl && cd /mnt/wsl/dfirdisk/opt/dfir && for x in $what; do [ -e `$x ] && cp -a `$x $outWsl/; done; ls -la $outWsl")
+  $c = Invoke-Wsl @("-d", $Rescue, "-u", "root", "--", "sh", "-c", "mkdir -p '$outWsl' && cd /mnt/wsl/dfirdisk/opt/dfir && for x in $what; do [ -e `$x ] && cp -a `$x '$outWsl/'; done; ls -la '$outWsl'")
   ($c[1] -split "`n") | ForEach-Object { Write-Host "    $_" }
   if ($c[0] -eq 0) { Write-Ok "saved to $outWin" } else { Write-Host "  the copy reported errors (exit $($c[0])); check $outWin" -ForegroundColor Yellow }
   [void](Invoke-Wsl @("--unmount", $vhd))

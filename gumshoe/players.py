@@ -244,10 +244,17 @@ def type_columns(header: list[str], samples: list[list[str]]) -> list[str]:
     return cols
 
 
-def _fk_targets(header: list[str], tables: dict[str, dict[str, Any]], this_table: str) -> dict[int, str]:
-    """column index -> referenced table name, for columns like customer_id / user_id / uid when such a table exists."""
+def _fk_targets(header: list[str], tables: dict[str, dict[str, Any]], this_key: str) -> dict[int, str]:
+    """column index -> the key (export/db/table) of the referenced table, for columns like customer_id / user_id / uid.
+    `tables` is keyed by export/db/table; a target in the same export and database wins, else a name that exists only
+    once across the case; a name that exists in several databases and not in this one is left alone (two shops' `users`
+    tables must not be joined across each other)."""
     out = {}
-    names = {t.lower(): t for t in tables}
+    this = tables.get(this_key) or {}
+    this_src, this_db, this_table = this.get("source", ""), this.get("db", ""), (this.get("table") or this_key.rsplit("/", 1)[-1])
+    by_name: dict[str, list[str]] = {}
+    for k, t in tables.items():
+        by_name.setdefault((t.get("table") or k.rsplit("/", 1)[-1]).lower(), []).append(k)
     for i, col in enumerate(header):
         m = re.match(r"^(?:id_)?([a-z0-9]+?)_?id$", col.lower())
         if not m:
@@ -256,9 +263,15 @@ def _fk_targets(header: list[str], tables: dict[str, dict[str, Any]], this_table
         if base in ("", "id") or base == this_table.lower():
             continue
         for cand in (base, base + "s", base + "es", base[:-1] if base.endswith("s") else base + "s", "wp_" + base + "s", "tbl_" + base, base + "_tbl"):
-            if cand in names and names[cand] != this_table:
-                out[i] = names[cand]
-                break
+            keys = [k for k in by_name.get(cand, []) if k != this_key]
+            if not keys:
+                continue
+            same = [k for k in keys if tables[k].get("source") == this_src and tables[k].get("db") == this_db]
+            if same:
+                out[i] = same[0]
+            elif len(keys) == 1:
+                out[i] = keys[0]
+            break
     return out
 
 
@@ -268,7 +281,7 @@ def _scan_table(args) -> str:
     source, db, table, files, fk_maps, rows_cap, packdir = args
     csv.field_size_limit(min(sys.maxsize, 2**31 - 1))          # dump rows can carry very large text cells
     where = f"{db}.{table}"
-    acc = Acc(source, where)
+    acc = Acc(f"{source}:{where}", where)       # the pack's source names the table: mentions/links/activity are kept per table, not per export
     try:
         return _scan_table_inner(acc, source, db, table, files, fk_maps, rows_cap, packdir)
     except Exception as e:  # noqa: BLE001 - one unreadable table must not lose the others
@@ -423,10 +436,11 @@ def build_fk_cache(tables: dict[str, dict[str, Any]], log: Log, fk_db: Path, max
     con.executescript("PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA cache_size=-100000;"
                       "CREATE TABLE fk(tbl TEXT, key TEXT, idents TEXT, PRIMARY KEY(tbl, key)) WITHOUT ROWID;")
     keyed: set[str] = set()
-    for name, t in tables.items():
+    for name, t in tables.items():            # name = export/db/table; the account-table test looks at the table's own name
         header, samples = _read_header_and_samples(Path(t["files"][0]), 500)
         ctypes = type_columns(header, samples)
-        if not (ACCOUNT_TABLE_RE.search(name) and any(c in ("email", "username", "phone", "wallet", "name") for c in ctypes)):
+        short = t.get("table") or name.rsplit("/", 1)[-1]
+        if not (ACCOUNT_TABLE_RE.search(short) and any(c in ("email", "username", "phone", "wallet", "name") for c in ctypes)):
             continue
         idc = next((i for i, h in enumerate(header) if h.lower() in ("id", "uid", "user_id", "userid", "customer_id", "account_id", "pk")), None)
         if idc is None:
@@ -1102,7 +1116,7 @@ def build(case, log: Log = print, workers: Optional[int] = None) -> dict[str, An
                     missing_example = missing_example or (files[0] if files else "")
                     continue
                 files = present
-                tables_by_name[r["table"]] = {"source": e["name"], "db": r["database"], "files": files}
+                tables_by_name[f"{e['name']}/{r['database']}/{r['table']}"] = {"source": e["name"], "db": r["database"], "table": r["table"], "files": files}
                 jobs.append((e["name"], r["database"], r["table"], files))
     log(f"[players] {len(jobs)} tables from {len(exports)} database export(s)" + (f"; {listed - len(jobs)} listed table(s) skipped" if listed > len(jobs) else ""))
     if exports and not jobs:
@@ -1118,7 +1132,8 @@ def build(case, log: Log = print, workers: Optional[int] = None) -> dict[str, An
     fk_maps = {}
     for src, db, table, files in jobs:
         header, _ = _read_header_and_samples(Path(files[0]), 1)
-        m = _fk_targets(header, {n: t for n, t in tables_by_name.items() if n in keyed}, table)
+        me = f"{src}/{db}/{table}"
+        m = _fk_targets(header, {n: t for n, t in tables_by_name.items() if n in keyed or n == me}, me)
         if m:
             fk_maps[(src, db, table)] = {str(k): v for k, v in m.items()}
     n_workers = workers or _worker_count()

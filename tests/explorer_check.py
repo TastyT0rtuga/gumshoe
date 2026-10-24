@@ -14,6 +14,8 @@ CREATE TABLE `orders` (`id` int, `user_id` int, `amount` decimal(12,2), `wallet`
 INSERT INTO `orders` VALUES (10,1,'100.00','bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq'),(11,2,'5.50','1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2'),(12,1,'7.00','');
 CREATE TABLE `logs` (`id` int, `line` text);
 INSERT INTO `logs` VALUES (1,'login alice from 10.0.0.1'),(2,'login bob from 10.0.0.2'),(3,'ALICE changed password');
+CREATE TABLE `odd` (`User ID` int, `E-Mail` varchar(100), `Amount ($)` decimal(10,2));
+INSERT INTO `odd` VALUES (1,'alice@x.example','100.00'),(2,'bob@x.example','5.50');
 """
 
 ok = True
@@ -43,9 +45,9 @@ with open(out / "tables.csv", "w", newline="", encoding="utf-8-sig") as f:
 (out / "source.json").write_text(json.dumps({"kind": "mysql-dump", "source": str(sql), "out": str(out), "tables": r["tables"], "name": "x"}), "utf-8")
 
 cat = dbexplore.catalog(case)
-check("catalog lists every table with columns", {t["table"] for t in cat} == {"users", "orders", "logs"} and next(t for t in cat if t["table"] == "users")["columns"] == ["id", "email", "name", "phone", "notes"])
+check("catalog lists every table with columns", {t["table"] for t in cat} == {"users", "orders", "logs", "odd"} and next(t for t in cat if t["table"] == "users")["columns"] == ["id", "email", "name", "phone", "notes"])
 hits = dbexplore.search_counts(case, "alice", "phrase", cat=cat)
-check("counts: 'alice' is in users and logs (case-insensitive)", {h["table"] for h in hits} == {"users", "logs"}, str(hits))
+check("counts: 'alice' is in users, logs and odd (case-insensitive)", {h["table"] for h in hits} == {"users", "logs", "odd"}, str(hits))
 users = next(t for t in cat if t["table"] == "users")
 check("exact rows: phrase 'alice' matches Alice's row and Carol's note", dbexplore.search_rows(users, "alice", "phrase")["matched"] == 2)
 check("mode all: 'alice vip' needs both words in a row", dbexplore.search_rows(users, "alice vip", "all")["matched"] == 1)
@@ -58,7 +60,7 @@ pg = dbexplore.page(users, 1, 2, {"email": "x.example"})
 check("page 2 of 2 rows with a column filter", [row[2] for row in pg["rows"]] == ["2", "3"] and pg["more"] is True)
 ex = dbexplore.export_search(case, "alice", "phrase", log=lambda s: None)
 files = sorted(p.name for p in Path(ex["out"]).iterdir())
-check("export_search writes one CSV per matching table + summary + query.json + README", ex["matching_rows"] == 4 and ex["tables_with_matches"] == 2 and "summary.csv" in files and "query.json" in files, str(files))
+check("export_search writes one CSV per matching table + summary + query.json + README", ex["matching_rows"] == 5 and ex["tables_with_matches"] == 3 and "summary.csv" in files and "query.json" in files, str(files))
 with open(Path(ex["out"]) / "x.dump.users.csv", encoding="utf-8-sig", newline="") as f:
     rows = list(csv.reader(f))
 check("the exported rows carry _file/_line and the table's columns", rows[0][:3] == ["_file", "_line", "id"] and len(rows) == 3)
@@ -72,10 +74,27 @@ check("writes are refused", dbexplore.sql(case, "DELETE FROM dump__users").get("
 check("UPDATE through a CTE is refused too", dbexplore.sql(case, "WITH x AS (SELECT 1) UPDATE dump__users SET name='x'").get("error"))
 pg2 = dbexplore.sql_page(case, "x/dump/orders", 0, 10, None, "amount", True, numeric=True)
 check("numeric sort puts 100.00 before 7.00 before 5.50", [r[4] for r in pg2["rows"]] == ["100.00", "7.00", "5.50"], str(pg2["rows"]))
-acts = [r.action for r in case.custody.tail(10)]
+# review of build p: columns whose names SQL cannot carry as they are (spaces, hyphens, punctuation) still filter and sort
+dbexplore.load_tables(case, ["x/dump/odd"], log=lambda s: None)
+pg3 = dbexplore.sql_page(case, "x/dump/odd", 0, 10, {"E-Mail": "alice"}, "Amount ($)", True, numeric=True)
+check("workbench filter and sort by the CSV's own column names (E-Mail, Amount ($))", pg3["total"] == 1 and pg3["rows"][0][3] == "alice@x.example" and pg3["header"][2:] == ["User ID", "E-Mail", "Amount ($)"], str(pg3))
+pg4 = dbexplore.sql_page(case, "x/dump/odd", 0, 10, None, "Amount ($)", True, numeric=True)
+check("numeric sort on a punctuated column name", [r[4] for r in pg4["rows"]] == ["100.00", "5.50"], str(pg4["rows"]))
+try:
+    dbexplore.search_counts(case, "[unclosed", "regex")
+    check("an invalid regex is refused with a message", False)
+except dbexplore.BadQuery as e:
+    check("an invalid regex is refused with a message", "not a valid regex" in str(e))
+q4 = dbexplore.sql(case, "-- a comment first\n/* and a block */ SELECT COUNT(*) FROM dump__users")
+check("SQL with leading comments runs", not q4.get("error") and q4["rows"] == [[4]], str(q4))
+q5 = dbexplore.sql(case, "SELECT 1; SELECT 2")
+check("two statements are refused cleanly", "one statement" in (q5.get("error") or ""), str(q5))
+q6 = dbexplore.sql(case, "SELECT * FROM no_such_table")
+check("a missing table is an error message, not a crash", "no such table" in (q6.get("error") or ""), str(q6))
+acts = [r.action for r in case.custody.tail(12)]
 check("custody records for the search export, the table export and the load", {"db_search_export", "db_tables_exported", "db_workbench_loaded"} <= set(acts), str(acts))
 n = dbexplore.unload(case)
-check("unload drops the tables", n == 2 and not dbexplore.loaded(case))
+check("unload drops the tables", n == 3 and not dbexplore.loaded(case))
 shutil.rmtree(tmp, ignore_errors=True)
 print("explorer check:", "OK" if ok else "FAILED")
 sys.exit(0 if ok else 1)

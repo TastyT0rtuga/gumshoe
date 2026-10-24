@@ -154,19 +154,19 @@ class CustodyLog:
         except OSError:
             pass
 
-    def _anchor_last(self) -> Optional[dict[str, Any]]:
+    def _anchor_entries(self) -> list[dict[str, Any]]:
         if not self.anchor or not self.anchor.exists():
-            return None
-        last = None
+            return []
+        out = []
         try:
             with open(self.anchor, "r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if line:
-                        last = json.loads(line)
+                        out.append(json.loads(line))
         except (OSError, ValueError):
-            return None
-        return last
+            return []
+        return out
 
     def _last(self) -> Optional[CustodyRecord]:
         last = None
@@ -207,6 +207,7 @@ class CustodyLog:
         prev = self.GENESIS
         n = 0
         expected_seq = 1
+        hashes: dict[int, str] = {}
         for rec in self.iter_records():
             n += 1
             if rec.seq != expected_seq:
@@ -216,14 +217,28 @@ class CustodyLog:
             if rec.compute_hash() != rec.hash:
                 return False, n, rec.seq, "record hash mismatch (record content was altered)"
             prev = rec.hash
+            hashes[rec.seq] = rec.hash
             expected_seq += 1
-        a = self._anchor_last()
-        if a:
-            if a.get("seq", 0) > n:
-                return False, n, n + 1, f"chain truncated: the anchor outside the case folder records {a['seq']} records, the log holds {n}"
-            if a.get("seq") == n and a.get("hash") != prev:
-                return False, n, n, "chain rewritten: the head hash differs from the anchor outside the case folder"
-            return True, n, None, f"chain intact over {n} records, head {prev[:12]}… matches the anchor"
+        # the anchor: every head ever written, in order. The log must hold every anchored (seq, hash); the anchor's
+        # sequence numbers must never step back (a cut chain that was appended to again leaves 1,2,3,2,3 behind); and the
+        # log must not run past the anchor (records written without an anchor)
+        entries = self._anchor_entries()
+        if entries:
+            last_seq = 0
+            top = 0
+            for a in entries:
+                seq, h = int(a.get("seq", 0)), a.get("hash")
+                if seq <= last_seq:
+                    return False, n, seq, f"chain cut and re-extended: the anchor outside the case folder steps back from record {last_seq} to {seq}"
+                last_seq = seq
+                top = max(top, seq)
+                if seq > n:
+                    return False, n, n + 1, f"chain truncated: the anchor outside the case folder records {seq} records, the log holds {n}"
+                if hashes.get(seq) != h:
+                    return False, n, seq, f"chain rewritten: record {seq} differs from the hash anchored outside the case folder"
+            if n > top:
+                return False, n, top + 1, f"{n - top} record(s) after record {top} are not in the anchor outside the case folder (the anchor folder was not writable, or the records were added by hand)"
+            return True, n, None, f"chain intact over {n} records, head {prev[:12]}… matches the anchor ({len(entries)} anchored)"
         return True, n, None, f"chain intact over {n} records, head {prev[:12]}… (no anchor file)"
 
     def tail(self, n: int = 20) -> list[CustodyRecord]:

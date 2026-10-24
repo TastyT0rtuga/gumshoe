@@ -240,7 +240,39 @@ class TableWriter:
         self._rej = None
         self.blob_dir = out_dir / f"{table}.blobs"       # where spilled cells go (a worker of the parallel path shares the table's)
         self.blob_prefix = ""                           # makes a worker's blob names unique inside the shared folder
+        self.columns_origin = ""                        # create | insert | placeholder: where the column names came from
+        self._header_dirty = False                      # columns changed after a file was opened: headers rewritten at close
+        self._old_parts: list[tuple[int, list[str]]] = []   # (files written so far, their column order) before a late CREATE TABLE
         out_dir.mkdir(parents=True, exist_ok=True)
+
+    def widen(self, names: list[str]) -> None:
+        """An INSERT names columns the table did not have yet (no CREATE TABLE seen): they are appended; rows written
+        before are shorter than the final header, which every reader here tolerates."""
+        have = {c.lower() for c in self.columns}
+        new = [n for n in names if n.lower() not in have]
+        if new:
+            self.columns = list(self.columns) + new
+            self._header_dirty = bool(self.files)
+
+    def rename_placeholders(self, names: list[str]) -> None:
+        """Placeholder columns (col1..colN) get the names of the first INSERT that has a column list of the same length."""
+        if len(names) == len(self.columns):
+            self.columns = list(names)
+            self.columns_origin = "insert"
+            self._header_dirty = bool(self.files)
+
+    def adopt_columns(self, create_cols: list[str]) -> None:
+        """The CREATE TABLE arrived after rows were written in an INSERT's own order: from now on rows go into a new part
+        in the table's order; the parts written before are remapped onto it at close."""
+        if create_cols and [c.lower() for c in create_cols] != [c.lower() for c in self.columns]:
+            if self._f is not None:
+                self._f.close()
+                self._f = None
+                self._w = None
+            self._old_parts.append((len(self.files), list(self.columns)))
+            self.columns = list(create_cols)
+            self._in_file = self.rows_per_file          # the next row opens a new part
+        self.columns_origin = "create"
 
     def reject(self, row) -> None:
         """A row the table cannot take as it is (another number of values than columns): kept, visibly, apart."""
@@ -341,6 +373,22 @@ class TableWriter:
         if self._rej is not None:
             self._rejf.close()
             self._rej = None
+        for n_files, old_cols in self._old_parts:
+            # parts written before a late CREATE TABLE, in an INSERT's order (or placeholder names): the table's order now
+            final_l = {c.lower() for c in self.columns}
+            for f in self.files[:n_files]:
+                if not f.exists():
+                    continue
+                if old_cols and old_cols[0] == "col1" and len(old_cols) == len(self.columns):
+                    _rewrite_header(f, self.columns)
+                elif all(c.lower() in final_l for c in old_cols):
+                    _remap_part(f, old_cols, self.columns)
+        self._old_parts = []
+        if self._header_dirty:
+            for f in self.files:
+                if f.exists():
+                    _rewrite_header(f, self.columns)
+            self._header_dirty = False
         return {"rows": self.rows, "files": [f.name for f in self.files], "bytes": sum(f.stat().st_size for f in self.files if f.exists()),
                 "blobs": self.blobs, "rejected": self.rejected}
 
@@ -534,45 +582,56 @@ _COLDEF_RE = re.compile(r"^\s*[`\"]([^`\"]+)[`\"]\s", re.M)
 _NOT_COLS = ("PRIMARY", "KEY", "UNIQUE", "CONSTRAINT", "INDEX", "FULLTEXT", "SPATIAL", "FOREIGN", "CHECK", "PERIOD")
 
 
-def columns_from_create(stmt: str) -> list[str]:
-    """Column names of a CREATE TABLE statement (one per line or all on one line)."""
+def _skip_string(text: str, j: int, backslash: bool) -> int:
+    """j at a quote: the index just past the string literal (the same grammar as the row reader: backslash escapes
+    and doubled quotes, or doubled quotes only), or j + 1 for a lone quote."""
+    c = text[j]
+    if c == "`":
+        m = re.compile(_BQ).match(text, j)
+    elif c == "'":
+        m = re.compile(_SQ if backslash else _SQ_NB).match(text, j)
+    else:
+        m = re.compile(_DQ if backslash else _DQ_NB).match(text, j)
+    return m.end() if m else j + 1
+
+
+def columns_from_create(stmt: str, backslash: bool = True) -> list[str]:
+    """Column names of a CREATE TABLE statement (one per line or all on one line). Strings in DEFAULT / COMMENT clauses
+    are skipped with the dump's own escape grammar, so a `)` or `,` inside `COMMENT 'it\'s (x), y'` is not structure."""
     i = stmt.find("(")
     if i < 0:
         return []
     depth, j = 0, i
-    in_q = None
-    for j in range(i, len(stmt)):
+    while j < len(stmt):
         c = stmt[j]
-        if in_q:
-            if c == in_q:
-                in_q = None
-            continue
         if c in ("'", '"', "`"):
-            in_q = c
-        elif c == "(":
+            j = _skip_string(stmt, j, backslash)
+            continue
+        if c == "(":
             depth += 1
         elif c == ")":
             depth -= 1
             if depth == 0:
                 break
+        j += 1
     body = stmt[i + 1:j]
     cols: list[str] = []
-    depth, start, in_q = 0, 0, None
+    depth, start = 0, 0
     pieces: list[str] = []
-    for k, c in enumerate(body):
-        if in_q:
-            if c == in_q:
-                in_q = None
-            continue
+    k = 0
+    while k < len(body):
+        c = body[k]
         if c in ("'", '"', "`"):
-            in_q = c
-        elif c == "(":
+            k = _skip_string(body, k, backslash)
+            continue
+        if c == "(":
             depth += 1
         elif c == ")":
             depth -= 1
         elif c == "," and depth == 0:
             pieces.append(body[start:k])
             start = k + 1
+        k += 1
     pieces.append(body[start:])
     for piece in pieces:
         t = piece.strip()
@@ -969,8 +1028,16 @@ def parse_mysql_dump(chunks, writer_for, on_create=None, on_db=None, progress=No
             # name; a row with another number of values than the table has goes to <table>.rejected.csv, counted, never shifted
             ncols = len(w.columns) if w.columns else 0
             remap = None
-            if cols and w.columns and cols != w.columns:
+            if cols and w.columns and [c.lower() for c in cols] != [c.lower() for c in w.columns]:
                 idx = {c.lower(): i for i, c in enumerate(w.columns)}
+                if not all(c.lower() in idx for c in cols) and w.columns_origin != "create":
+                    # no CREATE TABLE seen (yet): the table's columns are what the INSERTs name
+                    if w.columns_origin == "placeholder" and len(cols) == len(w.columns):
+                        w.rename_placeholders(cols)
+                    else:
+                        w.widen(cols)
+                    idx = {c.lower(): i for i, c in enumerate(w.columns)}
+                    ncols = len(w.columns)
                 if all(c.lower() in idx for c in cols):
                     remap = [idx[c.lower()] for c in cols]
             while True:
@@ -1018,6 +1085,7 @@ def parse_mysql_dump(chunks, writer_for, on_create=None, on_db=None, progress=No
                     row = [fld(t, False) for t in findall(st.buf, a, b)]
                 if not w.columns:
                     w.columns = [f"col{i + 1}" for i in range(len(row))]
+                    w.columns_origin = "placeholder"
                     ncols = len(row)
                 if remap is not None:
                     if len(row) == len(remap):
@@ -1161,13 +1229,16 @@ def extract_dump(src: Path, out: Path, log: Log, kind: str = "mysql-dump", rows_
         if w is None:
             cols = columns.get(key) or ncols_hint or []       # CREATE TABLE's columns first; an INSERT's own list is mapped onto them
             w = writers[key] = TableWriter(out / slug(db), slug(table), cols, rows_per_file)
+            w.columns_origin = "create" if columns.get(key) else ("insert" if ncols_hint else "")
         return w
 
     def on_create(db: str, table: str, text: str) -> None:
         key = (db, table)
-        columns[key] = columns_from_create(text)
+        columns[key] = columns_from_create(text, bool(backslash))
         if key in writers and not writers[key].columns:
             writers[key].columns = columns[key]
+        elif key in writers and writers[key].columns_origin != "create":
+            writers[key].adopt_columns(columns[key])        # the CREATE came after the first INSERT: the table's order wins
         schema_lines.append(text.strip() + "\n\n")
 
     def progress_at(pos: int) -> None:
@@ -1372,15 +1443,18 @@ def _dump_worker(args) -> dict[str, Any]:
         w = writers.get(key)
         if w is None:
             w = writers[key] = TableWriter(out / slug(db), f"{slug(table)}.w{idx:02d}", columns.get(key) or cols or [], rows_per_file)
+            w.columns_origin = "create" if columns.get(key) else ("insert" if cols else "")
             w.blob_dir = out / slug(db) / f"{slug(table)}.blobs"        # every worker spills into the table's folder, under its own prefix
             w.blob_prefix = f"w{idx:02d}."
         return w
 
     def on_create(db: str, table: str, text: str) -> None:
         key = (db, table)
-        columns[key] = columns_from_create(text)
+        columns[key] = columns_from_create(text, backslash)
         if key in writers and not writers[key].columns:
             writers[key].columns = columns[key]
+        elif key in writers and writers[key].columns_origin != "create":
+            writers[key].adopt_columns(columns[key])
         schema.append(text.strip() + "\n\n")
 
     def prog(consumed: int) -> None:
@@ -1492,6 +1566,18 @@ def extract_dump_parallel(src: Path, out: Path, log: Log, workers: int, rows_per
         parts: list[Path] = []
         rows = 0
         cols_used: list[str] = []
+        # the table's columns: the CREATE TABLE's when any worker saw it, else the union of what the workers' INSERTs named
+        # (first appearance order), so every part ends up with one header
+        final_cols = list(columns.get(k) or [])
+        if not final_cols:
+            seen_l: set[str] = set()
+            for r in results:
+                t = r["tables"].get(k)
+                if t and t["columns"] and not t.get("placeholder"):
+                    for c in t["columns"]:
+                        if c.lower() not in seen_l:
+                            seen_l.add(c.lower())
+                            final_cols.append(c)
         for r in results:
             t = r["tables"].get(k)
             if not t:
@@ -1500,10 +1586,10 @@ def extract_dump_parallel(src: Path, out: Path, log: Log, workers: int, rows_per
             cols_used = cols_used or t["columns"]
             for fn in t["files"]:
                 pth = ddir / fn
-                if t.get("placeholder") and columns.get(k):
-                    _rewrite_header(pth, columns[k])
-                elif columns.get(k) and t["columns"] and [c.lower() for c in t["columns"]] != [c.lower() for c in columns[k]]:
-                    _remap_part(pth, t["columns"], columns[k])      # this worker never saw the CREATE TABLE: its INSERT's order -> the table's
+                if t.get("placeholder") and final_cols:
+                    _rewrite_header(pth, final_cols)
+                elif final_cols and t["columns"] and [c.lower() for c in t["columns"]] != [c.lower() for c in final_cols]:
+                    _remap_part(pth, t["columns"], final_cols)      # this worker never saw the CREATE TABLE: its INSERT's order -> the table's
                 parts.append(pth)
         final: list[str] = []
         if len(parts) == 1:
@@ -1532,7 +1618,7 @@ def extract_dump_parallel(src: Path, out: Path, log: Log, workers: int, rows_per
                         shutil.copyfileobj(fin, fout, 2**20)
                     p_.unlink()
             rejected = sum(t.get("rejected", 0) for t in (r["tables"].get(k) for r in results) if t)
-        tables.append({"database": db, "table": table, "rows": rows, "columns": len(columns.get(k) or cols_used), "files": final,
+        tables.append({"database": db, "table": table, "rows": rows, "columns": len(final_cols or cols_used), "files": final,
                        "bytes": sum((ddir / f).stat().st_size for f in final), "blobs": blobs, "rejected": rejected})
     (out / "schema.sql").write_text("".join(r["schema"] for r in results), "utf-8")
     log(f"[db] {src.name}: done - {len(tables)} tables, {sum(t['rows'] for t in tables)} rows in {(time.time() - t0) / 60:.1f} min "

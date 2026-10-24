@@ -83,11 +83,18 @@ def _words(query: str) -> list[str]:
     return [w for w in re.split(r"\s+", query.strip()) if w]
 
 
+class BadQuery(ValueError):
+    """A query that cannot be run (an invalid regex): the message is for the examiner."""
+
+
 def matcher(query: str, mode: str) -> Callable[[list[str]], bool]:
     """A predicate over a CSV record (list of cells) for one query and mode."""
     q = query.strip()
     if mode == "regex":
-        rx = re.compile(q, re.I | re.S)
+        try:
+            rx = re.compile(q, re.I | re.S)
+        except re.error as e:
+            raise BadQuery(f"not a valid regex: {e} (in {q!r})") from e
         return lambda cells: any(rx.search(c) for c in cells)
     if mode == "all":
         ws = [w.lower() for w in _words(q)]
@@ -104,16 +111,16 @@ def _grep_cmd(query: str, mode: str, files: list[str]) -> list[str]:
     the pattern). Exact per-record matching happens afterwards in Python on the candidate tables only."""
     base = ["grep", "-c", "-i", "-I"]
     if mode == "regex":
-        return base + ["-E", "-e", query] + files
+        return base + ["-E", "-e", query, "--"] + files
     if mode == "all":
         ws = _words(query)
-        return base + ["-F", "-e", ws[0] if ws else query] + files
+        return base + ["-F", "-e", ws[0] if ws else query, "--"] + files
     if mode == "any":
         cmd = base + ["-F"]
         for w in _words(query) or [query]:
             cmd += ["-e", w]
-        return cmd + files
-    return base + ["-F", "-e", query] + files
+        return cmd + ["--"] + files
+    return base + ["-F", "-e", query, "--"] + files
 
 
 def search_counts(case, query: str, mode: str = "phrase", keys: Optional[set[str]] = None, cat: Optional[list[dict[str, Any]]] = None) -> list[dict[str, Any]]:
@@ -122,6 +129,7 @@ def search_counts(case, query: str, mode: str = "phrase", keys: Optional[set[str
     with search_rows / export_search."""
     if not query.strip() or mode not in MODES:
         return []
+    matcher(query, mode)               # a bad regex is refused here, with its message, before any grep runs
     tables = [t for t in (cat or catalog(case)) if not keys or t["key"] in keys]
     out = []
     for t in tables:
@@ -319,18 +327,31 @@ def _sql_name(s: str) -> str:
 
 
 def loaded(case) -> dict[str, dict[str, Any]]:
-    """key -> {name, rows, loaded_at, bytes} of the tables in the workbench."""
+    """key -> {name, rows, loaded_at, export, database, table, columns (SQL names), original (CSV names)} of the tables in
+    the workbench."""
     p = workbench_path(case)
     if not p.exists():
         return {}
     try:
         con = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
-        out = {r[0]: {"name": r[1], "rows": r[2], "loaded_at": r[3], "export": r[4], "database": r[5], "table": r[6]}
-               for r in con.execute("SELECT key, name, rows, loaded_at, export, database, table_ FROM _catalog")}
+        out = {}
+        for r in con.execute("SELECT key, name, rows, loaded_at, export, database, table_, columns, original FROM _catalog"):
+            out[r[0]] = {"name": r[1], "rows": r[2], "loaded_at": r[3], "export": r[4], "database": r[5], "table": r[6],
+                         "columns": json.loads(r[7] or "[]"), "original": json.loads(r[8] or "[]")}
         con.close()
         return out
     except sqlite3.Error:
         return {}
+
+
+def _colmap(info: dict[str, Any]) -> dict[str, str]:
+    """CSV column name -> workbench column name (the UI shows the CSV names; SQL knows the sanitised ones)."""
+    m = {c: c for c in info.get("columns") or []}
+    for orig, c in zip(info.get("original") or [], info.get("columns") or []):
+        m[orig] = c
+    m.setdefault("_file", "_file")
+    m.setdefault("_line", "_line")
+    return m
 
 
 def load_tables(case, keys: list[str], log: Log = print, replace: bool = False) -> dict[str, Any]:
@@ -341,7 +362,9 @@ def load_tables(case, keys: list[str], log: Log = print, replace: bool = False) 
     p.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(p)
     con.executescript("PRAGMA journal_mode=WAL; PRAGMA synchronous=OFF; PRAGMA temp_store=FILE; PRAGMA cache_size=-200000;\n"
-                      "CREATE TABLE IF NOT EXISTS _catalog(key TEXT PRIMARY KEY, name TEXT, rows INTEGER, loaded_at TEXT, export TEXT, database TEXT, table_ TEXT, columns TEXT);")
+                      "CREATE TABLE IF NOT EXISTS _catalog(key TEXT PRIMARY KEY, name TEXT, rows INTEGER, loaded_at TEXT, export TEXT, database TEXT, table_ TEXT, columns TEXT, original TEXT);")
+    if "original" not in [r[1] for r in con.execute("PRAGMA table_info(_catalog)")]:
+        con.execute("ALTER TABLE _catalog ADD COLUMN original TEXT")
     done = []
     t0 = time.time()
     for i, k in enumerate(keys, 1):
@@ -356,9 +379,10 @@ def load_tables(case, keys: list[str], log: Log = print, replace: bool = False) 
         while name in existing:
             name = f"{base}_{n_}"
             n_ += 1
+        originals = list(t["columns"]) or [f"col{j + 1}" for j in range(len(_header(Path(t["files"][0]))) or 1)]
         cols = []
         seen: set[str] = set()
-        for c in t["columns"] or [f"col{j + 1}" for j in range(1)]:
+        for c in originals:
             cn = _sql_name(c)
             while cn in seen or cn in ("_file", "_line"):
                 cn += "_"
@@ -382,14 +406,14 @@ def load_tables(case, keys: list[str], log: Log = print, replace: bool = False) 
         if batch:
             con.executemany(ins, batch)
             n += len(batch)
-        for c, orig in zip(cols, t["columns"]):
+        for c, orig in zip(cols, originals):
             if re.search(r"(^|_)(id|uid|user|email|mail|phone|mobile|wallet|address|hash|ip|tx|order|account)", orig.lower()):
                 try:
                     con.execute(f'CREATE INDEX IF NOT EXISTS "ix_{name}_{c}" ON "{name}"("{c}")')
                 except sqlite3.Error:
                     pass
-        con.execute("INSERT OR REPLACE INTO _catalog(key, name, rows, loaded_at, export, database, table_, columns) VALUES (?,?,?,?,?,?,?,?)",
-                    (k, name, n, utc_now(), t["export"], t["database"], t["table"], json.dumps(cols)))
+        con.execute("INSERT OR REPLACE INTO _catalog(key, name, rows, loaded_at, export, database, table_, columns, original) VALUES (?,?,?,?,?,?,?,?,?)",
+                    (k, name, n, utc_now(), t["export"], t["database"], t["table"], json.dumps(cols), json.dumps(originals, ensure_ascii=False)))
         con.commit()
         done.append({"key": k, "name": name, "rows": n})
         log(f"[db-load] [{i}/{len(keys)}] {t['database']}.{t['table']} -> {name}: {n:,} rows")
@@ -416,6 +440,7 @@ def unload(case, keys: Optional[list[str]] = None) -> int:
 
 
 _SQL_OK = re.compile(r"^\s*(?:WITH\b|SELECT\b|EXPLAIN\b|PRAGMA\s+table_info)", re.I)
+_SQL_LEAD_CMT = re.compile(r"^\s*(?:--[^\n]*\n|/\*.*?\*/\s*)+", re.S)
 
 
 def sql(case, statement: str, limit: int = 2000, timeout_s: int = 120) -> dict[str, Any]:
@@ -424,9 +449,11 @@ def sql(case, statement: str, limit: int = 2000, timeout_s: int = 120) -> dict[s
     p = workbench_path(case)
     if not p.exists():
         return {"error": "nothing is loaded into the workbench yet"}
-    st = statement.strip().rstrip(";")
+    st = _SQL_LEAD_CMT.sub("", statement.strip()).strip().rstrip(";").strip()      # leading -- and /* */ comments are fine
     if not _SQL_OK.match(st):
         return {"error": "SELECT and WITH statements only (the workbench is read-only)"}
+    if not sqlite3.complete_statement(st + ";") or ";" in re.sub(r"'[^']*'|\"[^\"]*\"|--[^\n]*|/\*.*?\*/", "", st, flags=re.S):
+        return {"error": "one statement at a time (a ';' in the middle: run the queries one by one)"}
     con = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
     con.execute("PRAGMA query_only=1")
     deadline = time.time() + timeout_s
@@ -436,7 +463,7 @@ def sql(case, statement: str, limit: int = 2000, timeout_s: int = 120) -> dict[s
         cur = con.execute(st)
         header = [d[0] for d in cur.description] if cur.description else []
         rows = cur.fetchmany(limit + 1)
-    except sqlite3.OperationalError as e:
+    except (sqlite3.Error, sqlite3.Warning) as e:
         con.close()
         msg = str(e)
         if "interrupted" in msg:
@@ -460,19 +487,24 @@ def sql_page(case, key: str, offset: int = 0, limit: int = 200, filters: Optiona
     p = workbench_path(case)
     con = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
     cols = [r[1] for r in con.execute(f'PRAGMA table_info("{info["name"]}")')]
+    cmap = _colmap(info)                      # the UI names columns as the CSV does; SQL has the sanitised names
     where = []
     args: list[Any] = []
     for c, v in (filters or {}).items():
-        if c in cols and v:
-            where.append(f'"{c}" LIKE ? ESCAPE \'\\\'')
+        sc = cmap.get(c, c)
+        if sc in cols and v:
+            where.append(f'"{sc}" LIKE ? ESCAPE \'\\\'')
             args.append("%" + v.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%")
     w = (" WHERE " + " AND ".join(where)) if where else ""
     total = con.execute(f'SELECT COUNT(*) FROM "{info["name"]}"{w}', args).fetchone()[0]
-    col = f'CAST("{order_by}" AS REAL)' if numeric else f'"{order_by}"'        # every column is text; numeric sorts cast
-    ob = f' ORDER BY {col} {"DESC" if descending else "ASC"}' if order_by in cols else ""
+    oc = cmap.get(order_by, order_by) if order_by else None
+    col = f'CAST("{oc}" AS REAL)' if numeric else f'"{oc}"'        # every column is text; numeric sorts cast
+    ob = f' ORDER BY {col} {"DESC" if descending else "ASC"}' if oc in cols else ""
     rows = [list(r) for r in con.execute(f'SELECT * FROM "{info["name"]}"{w}{ob} LIMIT ? OFFSET ?', args + [limit, offset])]
     con.close()
-    return {"header": cols, "rows": rows, "total": total, "more": offset + len(rows) < total}
+    # the header goes back out under the CSV names, as the rest of the tab shows them
+    back = {v: k for k, v in cmap.items()}
+    return {"header": [back.get(c, c) for c in cols], "rows": rows, "total": total, "more": offset + len(rows) < total}
 
 
 def export_rows(case, header: list[str], rows: list[list[Any]], label: str, kind: str = "db-search", note: str = "") -> Path:

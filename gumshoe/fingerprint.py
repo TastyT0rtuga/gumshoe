@@ -773,7 +773,9 @@ def discover_app_roots(root: Path, vhosts: list[dict[str, Any]], max_roots: int 
 
     for v in vhosts:
         if v.get("docroot") and v.get("exists"):
-            dr = root / v["docroot"].lstrip("/")
+            dr = inroot(root / v["docroot"].lstrip("/"), root)        # a symlinked docroot is followed inside the image first,
+            if dr is None:                                             # so /www/wwwroot/site -> /data/site/public finds /data/site
+                continue
             add(app_root_of(dr), "vhost", v.get("domains"), v.get("conf"), dr)
     layouts = list(WEB_ROOTS) + ["home/*/public_html", "home/*/web/*/public_html", "var/www/vhosts/*/httpdocs", "home/*/domains/*/public_html", "home/*/htdocs",
                                  "home/forge/*", "home/runcloud/webapps/*", "srv/users/*/apps/*/public", "var/www/clients/client*/web*/web", "opt/1panel/apps/*/*",
@@ -961,8 +963,7 @@ def fingerprint_databases(case) -> list[dict[str, Any]]:
 
 # ---------------------------------------------------------------------------------------------- run / explain
 def fingerprint_host(root: Path) -> dict[str, Any]:
-    if _EVIDENCE_ROOT is None:
-        set_root(root)
+    set_root(root)
     ctx = Ctx(root)
     panels = score(ctx, PANELS)
     # aaPanel and BT Panel share one tree: keep the one whose own text marker matched (the higher score) when both score;
@@ -1106,6 +1107,11 @@ def run(case, log: Log = print, root: Optional[Path] = None) -> dict[str, Any]:
                      tags=["stack", "platform-pattern"], extra={"tables": c["matched"]})
         findings.append(f2.to_dict())
     case.write_findings(findings)
+    try:
+        from .collect import write_summary
+        write_summary(case, findings)            # the sidebar's counts follow the findings file
+    except Exception:  # noqa: BLE001 - the summary is a convenience; the findings are written
+        pass
     case.custody.append("fingerprinted", {"summary": fp["summary"], "apps": len(fp.get("apps") or []), "databases": len(fp["databases"])})
     log(f"[fingerprint] {fp['summary']}")
     return fp

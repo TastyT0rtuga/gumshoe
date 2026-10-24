@@ -211,6 +211,27 @@ INSERT INTO `s` SET a=1, b=2;
 INSERT INTO `s` VALUES (3,4);
 """, {"dump.s": [["3", "4"]]})
 
+# ---- review of build p: column lists that differ between INSERTs with no CREATE TABLE, a CREATE after the INSERTs, and
+# quotes with escapes / parentheses inside a CREATE TABLE's COMMENT or DEFAULT
+FIX["insert_lists_without_create"] = ("""INSERT INTO `u` (`id`, `name`) VALUES (1,'a');
+INSERT INTO `u` (`id`, `email`, `name`) VALUES (2,'e@x','b');
+INSERT INTO `u` (`name`, `id`) VALUES ('c',3);
+""", {"dump.u": [["1", "a"], ["2", "b", "e@x"], ["3", "c"]], "_headers": {"dump.u": ["id", "name", "email"]}, "_short_rows_ok": True})
+
+FIX["create_after_insert"] = ("""INSERT INTO `v` (`name`, `id`) VALUES ('a',1);
+CREATE TABLE `v` (`id` int, `name` varchar(10), `email` varchar(50));
+INSERT INTO `v` VALUES (2,'b','b@x');
+""", {"dump.v": [["1", "a", ""], ["2", "b", "b@x"]], "_headers": {"dump.v": ["id", "name", "email"]}})
+
+FIX["create_comment_escaped_quote_paren"] = ("""CREATE TABLE `items` (`id` int, `comment` varchar(255) DEFAULT 'it\\'s ), x', `real_col` int COMMENT "a \\"b\\" (c)");
+INSERT INTO `items` VALUES (1,'c',2);
+""", {"dump.items": [["1", "c", "2"]], "_headers": {"dump.items": ["id", "comment", "real_col"]}})
+
+FIX["create_comment_nb_mode"] = ("""/*!40101 SET SQL_MODE='NO_BACKSLASH_ESCAPES' */;
+CREATE TABLE `items` (`id` int, `path` varchar(255) DEFAULT 'C:\\', `note` text COMMENT 'it''s ), x', `real_col` int);
+INSERT INTO `items` VALUES (1,'C:\\','n',2);
+""", {"dump.items": [["1", "C:\\", "n", "2"]], "_headers": {"dump.items": ["id", "path", "note", "real_col"]}})
+
 
 def read_headers(out: Path):
     heads = {}
@@ -254,6 +275,13 @@ for name, (text, expected) in FIX.items():
             r = dbexport.extract_dump_parallel(src, out, logs.append, workers=3)
         got = read_rows(out)
         heads = read_headers(out)
+        if expected.get("_short_rows_ok"):
+            for k, rs in got.items():
+                w = max((len(r) for r in rs), default=0)
+                got[k] = [r + [""] * (w - len(r)) for r in rs]
+                for k2, v2 in list(expected.items()):
+                    if not k2.startswith("_"):
+                        expected[k2] = [r + [""] * (w - len(r)) for r in v2]
         for k, h in expected.get("_headers", {}).items():
             if heads.get(k) != h:
                 print(f"BAD {name:38s} {mode}: header of {k} = {heads.get(k)} expected {h}")
@@ -288,19 +316,22 @@ def run_chunked(text: str, chunk: int):
     src.write_text(text, encoding="utf-8")
     out = d / "out"
     writers, columns = {}, {}
+    backslash, _why = dbexport.detect_backslash_escapes(text[:2**20])
 
     def writer_for(db, table, cols):
         key = (db, table)
         if key not in writers:
             writers[key] = dbexport.TableWriter(out / dbexport.slug(db), dbexport.slug(table), columns.get(key) or cols or [], 10**9)
+            writers[key].columns_origin = "create" if columns.get(key) else ("insert" if cols else "")
         return writers[key]
 
     def on_create(db, table, text):
-        columns[(db, table)] = dbexport.columns_from_create(text)
+        columns[(db, table)] = dbexport.columns_from_create(text, backslash)
         if (db, table) in writers and not writers[(db, table)].columns:
             writers[(db, table)].columns = columns[(db, table)]
+        elif (db, table) in writers and writers[(db, table)].columns_origin != "create":
+            writers[(db, table)].adopt_columns(columns[(db, table)])
 
-    backslash, _why = dbexport.detect_backslash_escapes(text[:2**20])
     dbexport.parse_mysql_dump(dbexport._byte_chunks(src, 0, src.stat().st_size, chunk), writer_for, on_create, None, None, backslash=backslash)
     got, heads = {}, {}
     for (db, table), w in writers.items():
@@ -324,6 +355,11 @@ for chunk in (7, 64, 4096, 65536):
             continue
         got, heads = run_chunked(text, chunk)
         exp = {k: v for k, v in expected.items() if not k.startswith("_")}
+        if expected.get("_short_rows_ok"):
+            for k, rs in got.items():
+                w = max((len(r) for r in rs), default=0)
+                got[k] = [r + [""] * (w - len(r)) for r in rs]
+            exp = {k: [r + [""] * (max((len(x) for x in v), default=0) - len(r)) for r in v] for k, v in exp.items()}
         wrong = [k for k in exp if got.get(k) != exp[k]]
         wrong += [f"{k} header {heads.get(k)}" for k, h in expected.get("_headers", {}).items() if heads.get(k) != h]
         if wrong:

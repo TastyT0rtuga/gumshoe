@@ -163,15 +163,18 @@ def _sql_any_filter(case, key, text, offset, limit, order_by, desc, numeric=Fals
     p = dbexplore.workbench_path(case)
     con = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
     cols = [r[1] for r in con.execute(f'PRAGMA table_info("{info["name"]}")')]
+    cmap = dbexplore._colmap(info)
     like = "%" + text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
     where = " OR ".join(f'"{c}" LIKE ? ESCAPE \'\\\'' for c in cols if c not in ("_file", "_line"))
     args = [like] * (len(cols) - 2)
     total = con.execute(f'SELECT COUNT(*) FROM "{info["name"]}" WHERE {where}', args).fetchone()[0]
-    col = f'CAST("{order_by}" AS REAL)' if numeric else f'"{order_by}"'
-    ob = f' ORDER BY {col} {"DESC" if desc else "ASC"}' if order_by in cols else ""
+    oc = cmap.get(order_by, order_by) if order_by else None
+    col = f'CAST("{oc}" AS REAL)' if numeric else f'"{oc}"'
+    ob = f' ORDER BY {col} {"DESC" if desc else "ASC"}' if oc in cols else ""
     rows = [list(r) for r in con.execute(f'SELECT * FROM "{info["name"]}" WHERE {where}{ob} LIMIT ? OFFSET ?', args + [limit, offset])]
     con.close()
-    return {"header": cols, "rows": rows, "total": total, "more": offset + len(rows) < total}
+    back = {v: k for k, v in cmap.items()}
+    return {"header": [back.get(c, c) for c in cols], "rows": rows, "total": total, "more": offset + len(rows) < total}
 
 
 # --------------------------------------------------------------------------- Search
@@ -192,7 +195,11 @@ def _search(case, cat, root, cases_root, start_job, status_of):
     if st.session_state.get("dbx_counts_key") != ck:
         with st.spinner(f"searching {len(keys) if keys else len(cat)} tables..."):
             t0 = time.time()
-            st.session_state["dbx_counts"] = dbexplore.search_counts(case, q.strip(), mode_key, keys, cat)
+            try:
+                st.session_state["dbx_counts"] = dbexplore.search_counts(case, q.strip(), mode_key, keys, cat)
+            except dbexplore.BadQuery as e:
+                st.error(str(e))
+                return
             st.session_state["dbx_counts_secs"] = round(time.time() - t0, 1)
         st.session_state["dbx_counts_key"] = ck
         case.custody.append("db_search", {"query": q.strip(), "mode": mode_key, "tables": len(keys) if keys else len(cat), "hits": len(st.session_state["dbx_counts"])})
@@ -206,17 +213,19 @@ def _search(case, cat, root, cases_root, start_job, status_of):
                          "columns": ", ".join(h["columns"][:10]) + (" …" if len(h["columns"]) > 10 else ""), "key": h["key"]} for h in hits])
     ev = st.dataframe(hdf.drop(columns=["key"]), hide_index=True, width="stretch", on_select="rerun", selection_mode="single-row", key="dbx_hits")
     x1, x2, x3 = st.columns([1.4, 1.4, 3])
+    cols_only = x2.text_input("only in columns (names, comma-separated)", key="dbx_cols", placeholder="email, phone",
+                              help="rows match only when the text is in one of these columns; applies to the rows shown and to both exports")
+    cols = [c.strip() for c in cols_only.split(",") if c.strip()] or None
     if x1.button("Export every matching row (all tables)", key="dbx_export_all", type="primary"):
         if total_lines <= INLINE_EXPORT_MAX:
             with st.spinner("writing..."):
-                r = dbexplore.export_search(case, q.strip(), mode_key, keys, None, log=lambda s: None)
+                r = dbexplore.export_search(case, q.strip(), mode_key, keys, cols, log=lambda s: None)
             st.success(f"{r['matching_rows']:,} rows from {r['tables_with_matches']} table(s) -> `{to_windows(r['out'])}` (summary.csv, query.json, README.txt alongside)")
         else:
-            argv = ["db", "search", q.strip(), "--mode", mode_key, "--export"] + (["--tables", ",".join(sorted(keys))] if keys else [])
+            argv = ["db", "search", q.strip(), "--mode", mode_key, "--export"] + (["--tables", ",".join(sorted(keys))] if keys else []) + (["--columns", ",".join(cols)] if cols else [])
             start_job(root, cases_root, case.dir, "dbsearch", argv)
             st.info("a big export: running in the background (the log appears below; the folder is named in it when done)")
             st.rerun(scope="app")
-    cols_only = x2.text_input("only in columns (names, comma-separated)", key="dbx_cols", placeholder="email, phone")
     status, state = status_of(case.dir, "dbsearch")
     if status == "running":
         st.progress(0.5, text="export running in the background...")
@@ -231,7 +240,6 @@ def _search(case, cat, root, cases_root, start_job, status_of):
         return
     h = hits[srows[0]]
     t = next(x for x in cat if x["key"] == h["key"])
-    cols = [c.strip() for c in cols_only.split(",") if c.strip()] or None
     p1, p2 = st.columns([1, 1])
     size = p1.selectbox("rows per page", PAGE_SIZES, index=2, key="dbx_srows")
     pageno = p2.number_input("page", min_value=1, value=1, step=1, key="dbx_spage")

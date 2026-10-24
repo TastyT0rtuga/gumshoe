@@ -507,6 +507,39 @@ def run_selftest(verbose: bool = True) -> bool:
         log_path.write_bytes(original)
         ok3, _, _, _ = case.custody.verify()
         check("restored custody log verifies again", ok3)
+        # the anchor outside the case folder (review of build p): the four ways a chain can be cut or rewritten so that
+        # it is internally consistent again must all fail against the anchor, not only a modified record
+        anchor_path = case.custody.anchor
+        anchor_orig = anchor_path.read_bytes() if anchor_path and anchor_path.exists() else None
+        if anchor_orig is not None:
+            from gumshoe.integrity import CustodyLog
+            clean = original.decode("utf-8").splitlines()
+            # a) truncation: the last record dropped
+            log_path.write_text("\n".join(clean[:-1]) + "\n", "utf-8")
+            okt, _, _, msgt = case.custody.verify()
+            check("anchor: a truncated chain is detected", not okt and "truncated" in msgt, msgt)
+            # b) truncation followed by a normal action: the chain is re-extended and the anchor steps back
+            log_path.write_text("\n".join(clean[:-2]) + "\n", "utf-8")
+            case.custody.append("selftest_after_cut", {})
+            oke, _, _, msge = case.custody.verify()
+            check("anchor: a chain cut and then extended by a normal action is detected", not oke and ("anchored outside" in msge or "re-extended" in msge), msge)
+            anchor_path.write_bytes(anchor_orig)
+            # c) a chain rewritten from genesis and padded past the anchored count (internally consistent)
+            fresh = CustodyLog(log_path.parent / "rewritten.log", actor="selftest")
+            for i in range(len(clean) + 2):
+                fresh.append("padding", {"i": i})
+            log_path.write_bytes(fresh.path.read_bytes())
+            okr, _, _, msgr = case.custody.verify()
+            check("anchor: a rewritten and padded chain is detected", not okr and "rewritten" in msgr, msgr)
+            # d) records appended behind the anchor's back (consistent hashes, never anchored)
+            log_path.write_bytes(original)
+            CustodyLog(log_path, actor="selftest").append("unanchored", {})
+            oku, _, _, msgu = case.custody.verify()
+            check("anchor: records added without the anchor are reported", not oku and "not in the anchor" in msgu, msgu)
+            log_path.write_bytes(original)
+            anchor_path.write_bytes(anchor_orig)
+            ok4, _, _, msg4 = case.custody.verify()
+            check("anchor: the restored chain and anchor verify together", ok4, msg4)
     finally:
         os.environ.pop("GUMSHOE_OLLAMA", None)
         shutil.rmtree(tmp, ignore_errors=True)

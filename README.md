@@ -20,7 +20,7 @@ every site are built on, scored with the evidence.
 ```bash
 git clone https://github.com/<you>/gumshoe && cd gumshoe
 pip install -r requirements.txt
-python gumshoe.py selftest          # 55 checks, no model or evidence needed
+python gumshoe.py selftest          # 60 checks, no model or evidence needed
 python gumshoe.py --help
 ```
 

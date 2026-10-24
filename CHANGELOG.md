@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+- **Bug-hunt review of build p - all eight findings confirmed and fixed** (peer-review brief, section 11).
+  Players: (1) mentions were keyed per *export*, so an identifier seen in several tables of one dump kept only the
+  last table's mention - the three `audit_logs` rows naming an e-mail vanished behind its `users` row; mentions are now
+  kept per table (`export:db.table`), every locator survives. (2) Foreign keys were cached by bare table name across
+  every database, so with two databases each holding `users`, `app1.orders.user_id` resolved against `app2.users` and
+  Alice's $100 order was credited to Bob; keys are cached by `export/db/table` and a join looks in its own database
+  first, then in the only table of that name, else leaves the column unjoined. Both reproduced on the reviewer's
+  scenario by the new `tests/players_check.py`, which fails on build p and passes now.
+  Custody: (3) `verify()` compared the chain only with the anchor's *last* line, so a log truncated and then extended
+  by a normal action, or rewritten and padded past the anchored count, verified clean; every anchored (seq, hash) is
+  now checked against the chain, a step back in the anchor's sequence, a chain shorter than the anchor, or records
+  past the anchor all fail with a message saying which; the selftest now runs the four tamper scenarios (60 checks).
+  Dump reader: (4) a table without a `CREATE TABLE` in front took its columns from the first INSERT's column list
+  and rejected every later INSERT naming other columns (and a parallel worker that never saw the CREATE did the
+  same); the writer now widens its columns (or renames placeholder columns) as later lists arrive, a late `CREATE
+  TABLE` is adopted, and parts written before the final column set are remapped when the file is closed - also
+  across workers at stitch time. (5) `columns_from_create()` is string-aware: a `)` or `,` inside a `COMMENT '…'` or
+  `DEFAULT '…'` (with `\'` or `''` escapes) no longer ends the column list early.
+  Databases tab: (6) an invalid regex is a message under the search box, not a crash; SQL with leading `--` or
+  `/* */` comments runs, two statements in one box are refused with a message, a missing table is an error line; the
+  background search export honours the column restriction; grep gets `--` before the file list. (7) Workbench filters
+  and sorting use the CSV's own column names (`E-Mail`, `Amount ($)`, `User ID`), mapped to SQL names underneath.
+  Fingerprint and rescue: (8) `gumshoe fingerprint` refreshes `summary.json` (the sidebar counts were one or two
+  findings behind until the next normalize); a vhost docroot that is a symlink is resolved before its app root is
+  derived (one Laravel root with its domain instead of two half roots); `fingerprint_host()` always sets the
+  evidence root; `rescue.ps1` quotes the rescue folder inside `sh -c` so a path with a space works.
 - **Databases tab: explore, search and export without SQL, Docker or a database server** (the team's workaround was
   loading each dump into MariaDB in a Docker container and typing queries). Three sub-tabs under the extracted
   databases: **Explore** - one catalog of every table across every export (a server with 100+ tables is one filterable
