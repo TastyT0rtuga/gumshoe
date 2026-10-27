@@ -802,6 +802,28 @@ def discover_app_roots(root: Path, vhosts: list[dict[str, Any]], max_roots: int 
                             add(app_root_of(s), "webroot")
                 except OSError:
                     continue
+    # an export tree that IS an application (a dropped repository or web root), and the applications / repositories
+    # one to three levels under an export folder (source_code/<repo>, a legal return's layout, not a server's):
+    # a server image keeps the layouts above; a tree without /etc/passwd gets this walk as well
+    if not any(_is_file(root / h) for h in ("etc/passwd", "etc/os-release", "usr/lib/os-release")):
+        if _is_app_root(root) or _is_dir(root / ".git"):
+            add(root, "root")
+        stack = [(root, 0)]
+        seen_dirs = 0
+        while stack and seen_dirs < 3000:
+            d, depth = stack.pop()
+            try:
+                children = sorted(d.iterdir())[:400]
+            except OSError:
+                continue
+            for c in children:
+                seen_dirs += 1
+                if not _is_dir(c) or c.name in VENDOR_DIRS or c.name.startswith("."):
+                    continue
+                if _is_app_root(c) or _is_dir(c / ".git"):
+                    add(app_root_of(c) if c.name in DOCROOT_NAMES else c, "folder")
+                elif depth < 2:
+                    stack.append((c, depth + 1))
     # nested apps (one or two levels below a site)
     for rel in list(found)[:200]:
         base = root / rel.lstrip("/")
@@ -829,6 +851,117 @@ def app_candidates(app: Path) -> tuple[list[dict[str, Any]], dict[str, str], dic
     return score(ctx, APPS, min_pct=25), pk, npm, py
 
 
+# files that instruct an AI coding agent: their presence says the code was (at least partly) written with one
+AGENT_FILES = ("AGENTS.md", "CLAUDE.md", "GEMINI.md", ".cursorrules", ".cursor/rules", ".windsurfrules", ".clinerules", ".github/copilot-instructions.md",
+               ".aider.conf.yml", ".codex", ".continue")
+LOCALE_DIRS = ("translations", "lang", "resources/lang", "locale", "locales", "i18n", "languages", "app/lang", "app/language", "language", "src/locales", "public/locales")
+LANG_NAMES = {"en": "English", "ru": "Russian", "uk": "Ukrainian", "be": "Belarusian", "kk": "Kazakh", "zh": "Chinese", "zh-cn": "Chinese", "zh_cn": "Chinese", "zh-tw": "Chinese (trad.)",
+              "de": "German", "fr": "French", "es": "Spanish", "pt": "Portuguese", "pt-br": "Portuguese (BR)", "pt_br": "Portuguese (BR)", "it": "Italian", "tr": "Turkish", "fa": "Persian",
+              "ar": "Arabic", "hi": "Hindi", "id": "Indonesian", "vi": "Vietnamese", "th": "Thai", "pl": "Polish", "ro": "Romanian", "nl": "Dutch", "ja": "Japanese", "ko": "Korean",
+              "ms": "Malay", "bn": "Bengali", "ur": "Urdu", "he": "Hebrew", "el": "Greek", "cs": "Czech", "hu": "Hungarian", "sv": "Swedish", "bg": "Bulgarian", "sr": "Serbian",
+              "hr": "Croatian", "lt": "Lithuanian", "lv": "Latvian", "et": "Estonian", "ka": "Georgian", "hy": "Armenian", "az": "Azerbaijani", "uz": "Uzbek", "tg": "Tajik", "ky": "Kyrgyz",
+              "mn": "Mongolian", "my": "Burmese", "km": "Khmer", "tl": "Filipino", "sw": "Swahili", "am": "Amharic", "fi": "Finnish", "da": "Danish", "no": "Norwegian", "sk": "Slovak",
+              "sl": "Slovenian", "mk": "Macedonian", "sq": "Albanian"}
+_LOCALE_CODE_RE = re.compile(r"^([a-z]{2,3})(?:[_-]([A-Za-z]{2,4}))?$")
+_LOCALE_FILE_RE = re.compile(r"^[A-Za-z0-9_+-]+\.([a-z]{2,3}(?:[_-][A-Za-z]{2,4})?)\.(?:ya?ml|xlf|xliff|php|json|po|mo|ini|csv|txt)$")
+
+
+def app_locales(app: Path, max_entries: int = 400) -> list[dict[str, Any]]:
+    """The languages the application is translated into, from its translation folders: [{code, name, files}]."""
+    found: Counter = Counter()
+    for rel in LOCALE_DIRS:
+        d = app / rel
+        if not _is_dir(d):
+            continue
+        try:
+            entries = sorted(d.iterdir())[:max_entries]
+        except OSError:
+            continue
+        for e in entries:
+            name = e.name
+            if _is_dir(e) and _LOCALE_CODE_RE.match(name) and name not in ("js", "css", "src", "lib", "app", "bin", "doc", "api", "cli", "dev", "tmp", "src", "etc", "var", "log", "img"):
+                found[name.lower()] += 1
+            else:
+                m = _LOCALE_FILE_RE.match(name)
+                if m:
+                    found[m.group(1).lower()] += 1
+    out = []
+    for code, n in found.most_common(40):
+        base = code.split("_")[0].split("-")[0]
+        out.append({"code": code, "name": LANG_NAMES.get(code) or LANG_NAMES.get(base) or "", "files": n})
+    return out
+
+
+_GIT_SECTION_RE = re.compile(r"^\s*\[([^\]\s\"]+)(?:\s+\"([^\"]*)\")?\]\s*$")
+
+
+def parse_git_config(text: str) -> dict[str, dict[str, str]]:
+    """A git config file as text -> {section[.subsection]: {key: value}}. Never executed, never handed to git."""
+    out: dict[str, dict[str, str]] = {}
+    cur = ""
+    for raw in text.splitlines()[:5000]:
+        line = raw.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        m = _GIT_SECTION_RE.match(line)
+        if m:
+            cur = m.group(1).lower() + (f'.{m.group(2)}' if m.group(2) is not None else "")
+            out.setdefault(cur, {})
+            continue
+        if "=" in line and cur:
+            k, v = line.split("=", 1)
+            out[cur][k.strip().lower()] = v.strip().strip('"')
+    return out
+
+
+def repo_facts(app: Path) -> dict[str, Any]:
+    """What .git says without running git: remotes, the checked-out branch, shallow clone, config keys that would
+    run a command when git opens the repository (core.fsmonitor, core.sshCommand, hooksPath, diff.external ...)."""
+    g = app / ".git"
+    gitdir: Optional[Path] = None
+    if _is_dir(g):
+        gitdir = g
+    elif _is_file(g):                                   # a worktree / submodule: "gitdir: ../.git/modules/x"
+        try:
+            t = g.read_text("utf-8", errors="replace")[:4096]
+        except OSError:
+            t = ""
+        m = re.match(r"\s*gitdir:\s*(.+)", t)
+        if m:
+            cand = inroot((app / m.group(1).strip()) if not m.group(1).strip().startswith("/") else Path(m.group(1).strip()), _EVIDENCE_ROOT or app)
+            gitdir = cand if cand and _is_dir(cand) else None
+    if gitdir is None:
+        return {}
+    facts: dict[str, Any] = {"gitdir": str(gitdir), "remotes": [], "branch": "", "shallow": _is_file(gitdir / "shallow"), "command_keys": [], "hooks": []}
+    try:
+        cfg = parse_git_config((gitdir / "config").read_text("utf-8", errors="replace")[:262144]) if _is_file(gitdir / "config") else {}
+    except OSError:
+        cfg = {}
+    for sec, kv in cfg.items():
+        if sec.startswith("remote."):
+            facts["remotes"].append({"name": sec[7:], "url": kv.get("url", ""), "pushurl": kv.get("pushurl", "")})
+        if sec == "user" and (kv.get("name") or kv.get("email")):
+            facts["user"] = {"name": kv.get("name", ""), "email": kv.get("email", "")}
+    for sec, kv in cfg.items():
+        for k in kv:
+            full = f"{sec}.{k}"
+            if full in ("core.fsmonitor", "core.sshcommand", "core.hookspath", "core.pager", "core.editor", "core.gitproxy", "core.askpass", "diff.external", "credential.helper",
+                        "gpg.program", "uploadpack.packobjectshook", "receive.denycurrentbranch") or sec.startswith(("filter.", "diff.", "alias.", "includeif", "include")) \
+                    and k in ("clean", "smudge", "process", "textconv", "command", "path") or sec.startswith("alias."):
+                facts["command_keys"].append(f"{full} = {kv[k][:200]}")
+    try:
+        facts["branch"] = (gitdir / "HEAD").read_text("utf-8", errors="replace")[:200].strip().replace("ref: refs/heads/", "")
+    except OSError:
+        pass
+    hooks = gitdir / "hooks"
+    if _is_dir(hooks):
+        try:
+            facts["hooks"] = sorted(h.name for h in hooks.iterdir() if _is_file(h) and not h.name.endswith(".sample"))[:40]
+        except OSError:
+            pass
+    return facts
+
+
 def fingerprint_app(root: Path, entry: dict[str, Any], with_composition: bool = True) -> dict[str, Any]:
     app = root / entry["root"].lstrip("/")
     cands, pk, npm, py = app_candidates(app)
@@ -838,6 +971,9 @@ def fingerprint_app(root: Path, entry: dict[str, Any], with_composition: bool = 
                      "python": {k: v for k, v in sorted(py.items())}}
     d["package_names"] = {"composer": pk.get("__name__"), "npm": npm.get("__name__")}
     d["notable"] = notable_packages(pk, npm, py)
+    d["repo"] = repo_facts(app)
+    d["locales"] = app_locales(app)
+    d["agent_files"] = [f for f in AGENT_FILES if _is_file(app / f) or _is_dir(app / f)]
     if with_composition:
         d["composition"] = composition(app)
     try:
@@ -1042,6 +1178,17 @@ def explain(fp: dict[str, Any]) -> str:
                 L.append(f"      {c['name']}: {c['pct']}% - " + "; ".join(c["matched"][:5]) + (f" - {c['note']}" if c.get("note") else ""))
             if a.get("notable"):
                 L.append("      notable packages: " + "; ".join(f"{k}: {', '.join(v[:6])}" for k, v in a["notable"].items()))
+            rp = a.get("repo") or {}
+            if rp:
+                L.append("      git repository: " + (", ".join(f"{r['name']} = {r['url']}" for r in rp.get("remotes", [])[:4]) or "no remote configured")
+                         + (f"; branch {rp['branch']}" if rp.get("branch") else "") + ("; shallow clone" if rp.get("shallow") else "")
+                         + (f"; local user {rp['user'].get('name', '')} <{rp['user'].get('email', '')}>" if rp.get("user") else "")
+                         + (f"; CUSTOM HOOKS: {', '.join(rp['hooks'][:6])}" if rp.get("hooks") else "")
+                         + (f"; CONFIG RUNS COMMANDS: {'; '.join(rp['command_keys'][:4])}" if rp.get("command_keys") else ""))
+            if a.get("locales"):
+                L.append("      translated into: " + ", ".join(f"{l['code']}" + (f" ({l['name']})" if l.get("name") else "") for l in a["locales"][:12]))
+            if a.get("agent_files"):
+                L.append("      AI coding-agent instruction files: " + ", ".join(a["agent_files"]) + " (the code was written at least partly with an AI coding agent)")
             comp = a.get("composition") or {}
             if comp.get("ui_kits"):
                 L.append("      UI kits: " + ", ".join(k["kit"] for k in comp["ui_kits"][:8]))

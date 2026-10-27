@@ -31,6 +31,9 @@ STEPS = {
     "fingerprint": ("What is it built on", "control panel, frameworks / CMS / admin frameworks with versions, packages, language make-up, database table signatures - "
                                            "each with a percentage and its evidence (a minute)",
                     lambda c: ["fingerprint"]),
+    "code": ("Read the source code", "repositories (git history, authors, reflog, deleted files, remotes, secrets in history), configuration credentials and database "
+                                     "connections, the third-party services the code talks to, and identifiers - all searchable in the Databases tab and scanned by Players (minutes)",
+             lambda c: ["code"]),
 }
 
 
@@ -132,6 +135,8 @@ MILESTONES = {
                 ("auth log", 70, "logs"), ("documents scanned", 80, "documents"), ("players from", 90, "deriving players"), ("CSV folders", 96, "writing CSV folders"),
                 ("finished with exit", 100, "done")],
     "fingerprint": [("start:", 5, "starting"), ("[fingerprint] host", 70, "host and applications looked at"), ("[fingerprint]", 90, "summarising"), ("finished with exit", 100, "done")],
+    "code": [("start:", 3, "starting"), ("[code] ", 10, "finding repositories"), ("commits", 40, "reading git history"), ("configuration:", 70, "configuration"),
+             ("endpoints:", 85, "endpoints"), ("[code] done", 98, "writing tables"), ("finished with exit", 100, "done")],
     "deep":    [("start:", 2, "starting"), ("running uac", 4, "UAC"), ("running loki", 8, "Loki (intense)"), ("loki done", 40, "Loki done"),
                 ("chainsaw done", 48, "Chainsaw done"), ("[dbreview]", 50, "MariaDB review"), ("[normalize]", 58, "normalizing"),
                 ("[documents]", 64, "documents"), ("[index]", 72, "indexing"), ("[vectors]", 80, "vectors"),
@@ -365,6 +370,44 @@ def render_fingerprint(case):
             st.code(fp.get("report") or "", language=None)
 
 
+def render_code(case):
+    """The stored source-code read (collected/code.json): repositories, the services the code talks to, the
+    configuration credentials, and the pointer to the searchable tables."""
+    from gumshoe import code as codemod
+    cd = codemod.load(case)
+    if not cd:
+        st.caption("not run yet - drop a repository or a source_code folder, or point `--path` at one")
+        return
+    st.markdown(f"**{len(cd.get('repos', []))} repositories · {cd.get('config_values', 0)} configuration values · {cd.get('endpoints', 0)} hosts · {cd.get('identifiers', 0)} identifiers**  \n"
+                f"<small>read {str(cd.get('generated', ''))[:19]} · searchable in the Databases tab as `{cd.get('export', '')}` (tables `git.*`, `config.*`, `code.*`)</small>", unsafe_allow_html=True)
+    with st.expander("repositories, services and credentials", expanded=False):
+        repos = cd.get("repos") or []
+        if repos:
+            st.markdown(f"**Repositories** ({len(repos)})")
+            st.dataframe(pd.DataFrame([{"repo": r["repo"], "remotes": "; ".join(x["url"] for x in r["remotes"][:3]) or "-", "branch": r.get("branch", ""), "commits": r["commits"],
+                                        "reflog-only": r["reflog_only"], "authors": r["authors"], "first": r["first_commit"][:10], "last": r["last_commit"][:10], "deletions": r["deleted"],
+                                        "unreachable": r["unreachable_commits"], "secrets in history": r["history_secrets"], "AI-agent files": "; ".join(r.get("agent_files", [])),
+                                        "⚠ config runs commands": "; ".join(r.get("command_keys", []))[:200]} for r in repos]), hide_index=True, width="stretch")
+            danger = [r for r in repos if r.get("command_keys")]
+            if danger:
+                st.warning("A seized `.git/config` here sets keys that run a command when git opens the repository "
+                           "(core.fsmonitor / core.sshCommand / hooksPath / diff.external / filter.*). Gumshoe never loaded it. "
+                           "Do not open these folders in an IDE with git integration on a machine that matters: " + ", ".join(r["repo"] for r in danger))
+        if cd.get("export_links"):
+            st.markdown("**Which dump belongs to which application**")
+            st.dataframe(pd.DataFrame(cd["export_links"]), hide_index=True, width="stretch")
+        if cd.get("lead_hosts"):
+            st.markdown("**Services the code talks to**")
+            st.dataframe(pd.DataFrame([{"host": h["host"], "what": h["service"] or h["class"], "class": h["class"], "references": h["hits"], "files": h["files_n"],
+                                        "first seen": f"{h['first_file']}:{h['first_line']}"} for h in cd["lead_hosts"]]), hide_index=True, width="stretch")
+        if cd.get("public_ips"):
+            st.caption("public IPs in the code: " + ", ".join(h["host"] for h in cd["public_ips"][:30]))
+        st.caption("Full credential values, every commit, the reflog and the secrets recovered from history are in the CSV tables of the "
+                   f"`{cd.get('export', '')}` export - open them in the Databases tab (Explore / Search / SQL), where Players has also read them.")
+        with st.expander("plain-text report (what `gumshoe code` prints)"):
+            st.code(cd.get("report") or "", language=None)
+
+
 def any_running(case_dir: Path) -> list[str]:
     return [s for s in STEPS if step_status(case_dir, s)[0] == "running"]
 
@@ -432,6 +475,8 @@ def _render_steps(case, root: Path, cases_root: Path):
             render_outcome(case)
         if step == "fingerprint":
             render_fingerprint(case)
+        if step == "code":
+            render_code(case)
         if state:
             with st.expander(f"log: logs/{step}.log  (started {state.get('started')})", expanded=(status == "running")):
                 st.code(tail_log(case.dir, step) or "(empty)")

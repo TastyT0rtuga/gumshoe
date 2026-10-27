@@ -416,6 +416,27 @@ def cmd_fingerprint(args):
         print("\nSUMMARY: " + r["summary"])
 
 
+def cmd_code(args):
+    """Read the source code: repositories (git history, authors, reflog, deleted files, secrets in history, remotes),
+    configuration (credentials, DSNs, API keys by service), the services the code talks to, and identifiers - all as
+    searchable CSV tables and findings. Deterministic, no model."""
+    from . import code
+    from .winpath import to_wsl
+    root = None
+    if args.path:
+        p, note = to_wsl(args.path)
+        if note:
+            print(f"[code] {note}", file=sys.stderr)
+        root = Path(p)
+        if not root.is_dir():
+            sys.exit(f"not a directory: {root}")
+    r = code.run(_case(args), print, root=root)
+    if args.json:
+        print(json.dumps({k: v for k, v in r.items() if k != "report"}, indent=2, ensure_ascii=False, default=str))
+    else:
+        print(r["report"])
+
+
 def cmd_settings(args):
     """Show or change the examiner settings (hopper / work / exports folders, examiner name)."""
     from . import settings as cfgstore
@@ -706,6 +727,9 @@ def main(argv=None):
     s = sub.add_parser("fingerprint", help="what it is built on: control panel, frameworks / CMS / admin frameworks with versions, packages, language make-up, "
                                              "database table signatures - each with a percentage and the evidence"); s.set_defaults(fn=cmd_fingerprint)
     s.add_argument("--path", help="a mounted image or extracted tree to fingerprint (default: the case's evidence)"); s.add_argument("--json", action="store_true")
+    s = sub.add_parser("code", help="read the source code: git history/authors/reflog/deleted files/secrets-in-history, configuration credentials & DSNs, "
+                                     "the services the code talks to, and identifiers - as searchable tables and findings"); s.set_defaults(fn=cmd_code)
+    s.add_argument("--path", help="a repository, a source_code folder or a mounted tree (default: the case's evidence)"); s.add_argument("--json", action="store_true")
     s = sub.add_parser("settings", help="show or set the hopper / work / exports folders and the examiner name"); s.set_defaults(fn=cmd_settings)
     s.add_argument("--hopper"); s.add_argument("--work"); s.add_argument("--exports"); s.add_argument("--examiner")
     s = sub.add_parser("remount", help="after a reboot: mount a case's evidence again as intake did"); s.set_defaults(fn=cmd_remount)

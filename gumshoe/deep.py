@@ -104,6 +104,8 @@ def run(case_dir: Path, cfg: dict[str, Any], skip_tools: bool = False, no_vector
         stage("tools (UAC, Loki intense, GoAccess, ClamAV, Plaso, log conversion, Chainsaw)", lambda: run_tools(case, log=say))
     if (dcfg.get("dbreview") or {}).get("enabled", True):
         stage("MariaDB review (copy + crash recovery + canned queries)", lambda: __import__("gumshoe.dbreview", fromlist=["review"]).review(case, log=say))
+    stage("source code (repositories, configuration, endpoints, identifiers)",
+          lambda: __import__("gumshoe.code", fromlist=["run"]).run(case, log=say))
     stage("normalize + documents + webapp + correlate", lambda: normalize_all(case, log=say))
     stage("index" + (" + vectors" if dcfg["llm"]["use_embeddings"] else ""),
           lambda: build_index(case, log=say, with_vectors=dcfg["llm"]["use_embeddings"] and client.available(), client=client))

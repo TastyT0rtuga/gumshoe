@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+- **Source code intake: repositories, configuration and the services the code talks to** (`gumshoe code`, Run tab
+  "Read the source code", and automatic for a dropped repository or `source_code` folder). A legal return or an
+  image often carries the server's own code - git repositories, `.env` files, framework config - and that code names
+  the people who wrote it, the databases it uses and the third-party services behind it. The stage reads all of it
+  deterministically (no model) into CSV tables that the Databases tab searches and Players scans:
+  - **Repositories.** Every `.git` under the tree, read with git against a **shadow git directory** - the seized
+    `.git/config` is never loaded and nothing is written into the evidence, because a config can set
+    `core.fsmonitor`, `core.sshCommand`, `core.hooksPath`, `diff.external` or `filter.*.clean` that run a command
+    the moment git (or an IDE's git integration) opens the repository; those keys are reported as a finding instead.
+    Per repo: remotes (the hosting account), every commit reachable from the refs **and the reflog** (amended / reset
+    commits marked `reflog-only`) with author, e-mail and the author's **UTC offset** (the developer's time zone),
+    the reflog (who did what in that clone), files **deleted** from history, **unreachable** commits and blobs
+    (`git fsck`), and **secrets recovered from history** - a credential committed in an `.env` and later removed is
+    recovered with the commit that introduced it and whether the value is still in the working file.
+  - **Configuration.** `.env*`, `config/`, `docker-compose`, `wp-config.php`, `settings.py`, `.ini/.yml/.json` ...:
+    every credential, token, DSN, host and endpoint, classified by what it is for (database, messaging/Telegram,
+    SMS, shipping, payments, crypto, mail, captcha, geo/IP, cloud, proxy/anti-detect, AI ...), DSNs parsed, and the
+    database names matched against the case's extracted dumps - **which dump belongs to which application**.
+  - **Endpoints.** Every host, DSN, `t.me` link and public IP the code refers to (vendor/node_modules left out),
+    grouped by host and classified the same way, with documentation/CDN/schema links marked as noise.
+  - **Identifiers.** E-mails, wallets, handles, Telegram tokens/links and public IPs in code and configuration,
+    scanned into Players alongside the database identities. AI-coding-agent instruction files (`AGENTS.md`,
+    `CLAUDE.md`, `.cursorrules` ...) are flagged - the code was written at least partly with an agent.
+  Written as a `code-<name>` export (`git.repositories|commits|authors|reflog|deleted|unreachable|history_secrets|
+  history_identifiers`, `config.values|databases|export_links`, `code.endpoints|endpoint_hits|identifiers`) plus
+  `collected/code.json`, findings (`code.*`) and a custody record. The fingerprint now also treats a dropped
+  repository or a `source_code` folder as an application root (framework, packages, languages, locales, git remote).
+  New `tests/code_check.py`.
+
 - **Bug-hunt review of build p - all eight findings confirmed and fixed** (peer-review brief, section 11).
   Players: (1) mentions were keyed per *export*, so an identifier seen in several tables of one dump kept only the
   last table's mention - the three `audit_logs` rows naming an e-mail vanished behind its `users` row; mentions are now

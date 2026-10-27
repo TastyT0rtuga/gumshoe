@@ -902,6 +902,19 @@ class Intake:
             self._save(case)
         except Exception as e:  # noqa: BLE001
             self.log(f"[intake] fingerprint: failed: {type(e).__name__}: {e}")
+        # code: repositories, configuration credentials and the services the code talks to (before players, so the
+        # developers' e-mails, wallets and the historical secrets are scanned into the graph as a "code" export).
+        # Automatic for a dropped tree / export folder (a source_code folder, a repository); for a full mounted image
+        # the examiner runs it from the Run tab or `gumshoe code` so a whole rootfs is not walked unasked.
+        if case.mode == "export" and db_item is None:
+            try:
+                from . import code as code_mod
+                self.log("[intake] code: reading repositories and configuration")
+                cr = code_mod.run(case, self.log)
+                self.record["code"] = {"repos": len(cr.get("repos") or []), "endpoints": cr.get("endpoints"), "export": cr.get("export")}
+                self._save(case)
+            except Exception as e:  # noqa: BLE001 - never sink an intake over the code read
+                self.log(f"[intake] code: failed: {type(e).__name__}: {e}")
         # players: the graph over everything extracted so far (tables, logs, panel, documents)
         try:
             from . import players as players_mod
