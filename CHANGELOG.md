@@ -22,11 +22,23 @@
     database names matched against the case's extracted dumps - **which dump belongs to which application**.
   - **Endpoints.** Every host, DSN, `t.me` link and public IP the code refers to (vendor/node_modules left out),
     grouped by host and classified the same way, with documentation/CDN/schema links marked as noise.
+  - **Outbound calls & variable hosts (`code.calls`).** Every `curl` / `file_get_contents` / Guzzle / Symfony Http /
+    `requests` / `fetch` / `axios` call, socket (`fsockopen` / `stream_socket_client` / `socket` / `net.connect`),
+    mail call (`mail` / `wp_mail` / `smtplib` / `nodemailer`), shell `curl|sh` / `wget` (`code.shell_fetch_exec`),
+    Telegram/Discord notification, license/heartbeat/beacon check (`code.license_or_beacon`), and cron fetch -
+    including calls whose host or URL is a variable resolved from `.env` or configuration (`code.variable_host_call`).
+  - **Inbound webhooks & IPN handlers (`code.webhooks`).** Payment IPNs and webhooks (Perfect Money, Stripe, PayPal,
+    NOWPayments, Cryptomus, CoinPayments, BTCPay, Payeer, YooMoney ...), Telegram bot webhooks, AfterShip/Twilio
+    callbacks, and `/webhook` / `/ipn` / `/callback` / `/notify` routes and scripts, with signature verification and
+    payload fields (`code.webhook_handler`).
+  - **Per-provider pivot sheet (`code.pivots`).** One row per external contact joining live config credentials,
+    historical credentials removed from the working tree, git remotes, account/bot IDs, outbound calls, inbound
+    webhooks, dormant accounts, what data is sent, and what records that provider holds (`code.pivot`).
   - **Identifiers.** E-mails, wallets, handles, Telegram tokens/links and public IPs in code and configuration,
     scanned into Players alongside the database identities. AI-coding-agent instruction files (`AGENTS.md`,
     `CLAUDE.md`, `.cursorrules` ...) are flagged - the code was written at least partly with an agent.
   Written as a `code-<name>` export (`git.repositories|commits|authors|reflog|deleted|unreachable|history_secrets|
-  history_identifiers`, `config.values|databases|export_links`, `code.endpoints|endpoint_hits|identifiers`) plus
+  history_identifiers`, `config.values|databases|export_links`, `code.endpoints|endpoint_hits|calls|webhooks|pivots|identifiers`) plus
   `collected/code.json`, findings (`code.*`) and a custody record. The fingerprint now also treats a dropped
   repository or a `source_code` folder as an application root (framework, packages, languages, locales, git remote).
   New `tests/code_check.py`.

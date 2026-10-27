@@ -911,7 +911,7 @@ class Intake:
                 from . import code as code_mod
                 self.log("[intake] code: reading repositories and configuration")
                 cr = code_mod.run(case, self.log)
-                self.record["code"] = {"repos": len(cr.get("repos") or []), "endpoints": cr.get("endpoints"), "export": cr.get("export")}
+                self.record["code"] = {"repos": len(cr.get("repos") or []), "endpoints": cr.get("endpoints"), "calls": cr.get("calls"), "webhooks": cr.get("webhooks"), "pivots": cr.get("pivots"), "export": cr.get("export")}
                 self._save(case)
             except Exception as e:  # noqa: BLE001 - never sink an intake over the code read
                 self.log(f"[intake] code: failed: {type(e).__name__}: {e}")

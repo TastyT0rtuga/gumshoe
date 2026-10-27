@@ -32,7 +32,8 @@ STEPS = {
                                            "each with a percentage and its evidence (a minute)",
                     lambda c: ["fingerprint"]),
     "code": ("Read the source code", "repositories (git history, authors, reflog, deleted files, remotes, secrets in history), configuration credentials and database "
-                                     "connections, the third-party services the code talks to, and identifiers - all searchable in the Databases tab and scanned by Players (minutes)",
+                                     "connections, outbound call sites (including variable hosts from config), inbound webhooks/IPN handlers, the per-provider pivot sheet, "
+                                     "and identifiers - all searchable in the Databases tab and scanned by Players (minutes)",
              lambda c: ["code"]),
 }
 
@@ -136,7 +137,7 @@ MILESTONES = {
                 ("finished with exit", 100, "done")],
     "fingerprint": [("start:", 5, "starting"), ("[fingerprint] host", 70, "host and applications looked at"), ("[fingerprint]", 90, "summarising"), ("finished with exit", 100, "done")],
     "code": [("start:", 3, "starting"), ("[code] ", 10, "finding repositories"), ("commits", 40, "reading git history"), ("configuration:", 70, "configuration"),
-             ("endpoints:", 85, "endpoints"), ("[code] done", 98, "writing tables"), ("finished with exit", 100, "done")],
+             ("endpoints:", 85, "endpoints"), ("calls:", 92, "calls, webhooks and pivots"), ("[code] done", 98, "writing tables"), ("finished with exit", 100, "done")],
     "deep":    [("start:", 2, "starting"), ("running uac", 4, "UAC"), ("running loki", 8, "Loki (intense)"), ("loki done", 40, "Loki done"),
                 ("chainsaw done", 48, "Chainsaw done"), ("[dbreview]", 50, "MariaDB review"), ("[normalize]", 58, "normalizing"),
                 ("[documents]", 64, "documents"), ("[index]", 72, "indexing"), ("[vectors]", 80, "vectors"),
@@ -371,16 +372,17 @@ def render_fingerprint(case):
 
 
 def render_code(case):
-    """The stored source-code read (collected/code.json): repositories, the services the code talks to, the
-    configuration credentials, and the pointer to the searchable tables."""
+    """The stored source-code read (collected/code.json): repositories, the services the code talks to, outbound calls
+    (including variable hosts), inbound webhooks/IPN handlers, the per-provider pivot sheet, and configuration credentials."""
     from gumshoe import code as codemod
     cd = codemod.load(case)
     if not cd:
         st.caption("not run yet - drop a repository or a source_code folder, or point `--path` at one")
         return
-    st.markdown(f"**{len(cd.get('repos', []))} repositories · {cd.get('config_values', 0)} configuration values · {cd.get('endpoints', 0)} hosts · {cd.get('identifiers', 0)} identifiers**  \n"
+    st.markdown(f"**{len(cd.get('repos', []))} repositories · {cd.get('config_values', 0)} configuration values · {cd.get('endpoints', 0)} hosts · "
+                f"{cd.get('calls', 0)} calls · {cd.get('webhooks', 0)} webhooks · {cd.get('pivots', 0)} provider pivots · {cd.get('identifiers', 0)} identifiers**  \n"
                 f"<small>read {str(cd.get('generated', ''))[:19]} · searchable in the Databases tab as `{cd.get('export', '')}` (tables `git.*`, `config.*`, `code.*`)</small>", unsafe_allow_html=True)
-    with st.expander("repositories, services and credentials", expanded=False):
+    with st.expander("repositories, provider pivot sheet, calls, webhooks and credentials", expanded=False):
         repos = cd.get("repos") or []
         if repos:
             st.markdown(f"**Repositories** ({len(repos)})")
@@ -396,14 +398,33 @@ def render_code(case):
         if cd.get("export_links"):
             st.markdown("**Which dump belongs to which application**")
             st.dataframe(pd.DataFrame(cd["export_links"]), hide_index=True, width="stretch")
+        if cd.get("pivot_rows"):
+            st.markdown(f"**Per-provider pivot sheet** ({len(cd['pivot_rows'])})")
+            st.dataframe(pd.DataFrame([{"provider": p["provider"], "class": p["class"], "direction": p["direction"], "hosts": p["hosts"],
+                                        "what is sent / received": p["what_sent"], "credentials (masked)": p["credentials_masked"] or p["credential_keys"],
+                                        "accounts / IDs": p.get("accounts_or_ids", ""), "history only": p.get("history_only", False),
+                                        "call sites": p.get("call_sites", ""), "webhooks": p.get("webhook_sites", ""),
+                                        "what the provider holds": p.get("provider_holds", "")} for p in cd["pivot_rows"]]), hide_index=True, width="stretch")
+        if cd.get("call_rows"):
+            st.markdown(f"**Outbound calls & beacons** ({cd.get('calls', len(cd['call_rows']))})")
+            st.dataframe(pd.DataFrame([{"where": f"{c['file']}:{c['line']}", "kind": c["kind"], "mechanism": c["mechanism"], "method": c["method"],
+                                        "host": c["host"], "service": c["service"] or c["class"], "resolved from": c.get("resolved_from", ""),
+                                        "payload": c.get("payload", ""), "credential": c.get("credential_key", ""), "flags": c.get("flags", "")}
+                                       for c in cd["call_rows"]]), hide_index=True, width="stretch")
+        if cd.get("webhook_rows"):
+            st.markdown(f"**Inbound webhooks / IPN handlers** ({cd.get('webhooks', len(cd['webhook_rows']))})")
+            st.dataframe(pd.DataFrame([{"where": f"{w['file']}:{w['line']}", "kind": w["kind"], "route / script": w["route_or_script"],
+                                        "service": w["service"] or w["class"], "verification": w["verification"],
+                                        "payload fields": w.get("payload_fields", ""), "credential": w.get("credential_key", "")}
+                                       for w in cd["webhook_rows"]]), hide_index=True, width="stretch")
         if cd.get("lead_hosts"):
             st.markdown("**Services the code talks to**")
             st.dataframe(pd.DataFrame([{"host": h["host"], "what": h["service"] or h["class"], "class": h["class"], "references": h["hits"], "files": h["files_n"],
                                         "first seen": f"{h['first_file']}:{h['first_line']}"} for h in cd["lead_hosts"]]), hide_index=True, width="stretch")
         if cd.get("public_ips"):
             st.caption("public IPs in the code: " + ", ".join(h["host"] for h in cd["public_ips"][:30]))
-        st.caption("Full credential values, every commit, the reflog and the secrets recovered from history are in the CSV tables of the "
-                   f"`{cd.get('export', '')}` export - open them in the Databases tab (Explore / Search / SQL), where Players has also read them.")
+        st.caption("Full credential values, every commit, the reflog, the secrets recovered from history, `code/calls.csv`, `code/webhooks.csv` and `code/pivots.csv` "
+                   f"are in the CSV tables of the `{cd.get('export', '')}` export - open them in the Databases tab (Explore / Search / SQL), where Players has also read them.")
         with st.expander("plain-text report (what `gumshoe code` prints)"):
             st.code(cd.get("report") or "", language=None)
 

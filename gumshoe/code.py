@@ -17,11 +17,16 @@ For an export tree (a dropped repository, a `source_code` folder of a legal retu
     database names matched against the case's database exports (which dump belongs to which application).
   * ENDPOINTS - every URL, DSN, t.me link and IP the code refers to (vendor / node_modules left out), grouped by
     host and classified the same way, with documentation / CDN / schema links marked as noise.
+  * CALLS & WEBHOOKS - every outbound network/service call (curl/fetch/requests/Guzzle/Http, sockets, mail, shell
+    curl|sh and wget, Telegram/Discord notifies, license/heartbeat checks, cron fetches) including calls whose host
+    or URL is a variable resolved from configuration, plus inbound webhook / IPN / callback handlers.
+  * PIVOTS - one row per external provider / contact joining live and historical credentials, account/bot IDs,
+    outbound calls, inbound webhooks, what data is sent, and what records that provider holds on its side.
   * IDENTIFIERS - e-mails, wallets, handles, IPs in code and configuration.
 
 Everything is written as CSV tables under a "code" export of the case (<case>/db/code-<name>/ -> git.commits,
 git.authors, git.reflog, git.deleted, git.unreachable, git.history_secrets, config.values, config.databases,
-code.endpoints, code.endpoint_hits, code.identifiers), so the Databases tab searches them with the extracted
+code.endpoints, code.endpoint_hits, code.calls, code.webhooks, code.pivots, code.identifiers), so the Databases tab searches them with the extracted
 databases and Players scans them (a developer's e-mail meets the users table), plus collected/code.json with the
 summary, findings (code.*) and a custody record. `gumshoe code`.
 """
@@ -84,12 +89,12 @@ SECRET_PATH_RE = re.compile(r"(^|/)(\.env[^/]*|[^/]*\.(pem|key|p12|pfx|ppk|ini|y
                             r"|\.htpasswd|\.netrc|\.npmrc|\.pypirc|\.my\.cnf|id_(rsa|dsa|ecdsa|ed25519)|credentials[^/]*|secrets?[^/]*|\.git-credentials|setup\.php|install\.php"
                             r"|first-install[^/]*\.php|Dockerfile[^/]*|\.gitlab-ci\.yml|[^/]*\.sql)$", re.I)
 SECRET_KEY_RE = re.compile(r"(pass(word|wd|phrase)?|pwd|secret|token|api[_-]?key|apikey|(^|_)key$|_key(_|$)|auth|dsn|database|(^|_)db(_|$)|mysql|maria|postgres|pgsql|mongo|redis|rabbit|amqp"
-                           r"|smtp|imap|mail|(^|_)bot|telegram|tg_|twilio|nexmo|vonage|plivo|sms|aftership|shippo|easypost|stripe|paypal|coinbase|binance|aws|s3_|bucket|cloudflare|captcha"
+                           r"|smtp|imap|mail|(^|_)bot|telegram|tg_|twilio|nexmo|vonage|plivo|sms|aftership|shippo|easypost|stripe|paypal|perfect_?money|payment|coinbase|binance|aws|s3_|bucket|cloudflare|captcha"
                            r"|proxy|socks|webhook|private|credential|login|(^|_)user(name)?$|host(name)?$|_host|endpoint|url$|_url|uri$|_uri|domain$|wallet|address|licen[cs]e|jwt|session"
                            r"|salt|seed|mnemonic|cookie|openai|anthropic|gemini|deepseek|client_id|client_secret|app_id|account_sid|merchant|shop_id|api_id|api_hash|phone|port$)", re.I)
 PLACEHOLDER_RE = re.compile(r"^(|\s*|xxx+|yyy+|zzz+|\*+|\.\.\.|null|none|nil|undefined|false|true|0|1|change[_-]?me|changeit|your[_-].*|<.*>|\[.*\]|\$\{.*\}|%.*%|example.*|sample.*|dummy.*|placeholder.*|secret|password|passw0rd|root|admin|test|localhost|127\.0\.0\.1|todo|tbd|fixme|~|-)$", re.I)
 DSN_RE = re.compile(r"^(?P<scheme>[a-z][a-z0-9+.-]{1,24})://(?:(?P<user>[^:@/\s]*)(?::(?P<pw>[^@/\s]*))?@)?(?P<host>\[[0-9a-fA-F:.]+\]|[^:/?#\s]+)?(?::(?P<port>\d{1,5}))?(?:/(?P<db>[^?#\s]*))?(?:\?(?P<q>[^#\s]*))?", re.I)
-TG_TOKEN_RE = re.compile(r"(?<![\w:])(\d{8,10}:[A-Za-z0-9_-]{35})(?![\w-])")
+TG_TOKEN_RE = re.compile(r"(?<![\w:])(\d{8,10}:[A-Za-z0-9_-]{35,45})(?![\w-])")
 TME_RE = re.compile(r"(?<![\w/])(?:https?://)?(?:t\.me|telegram\.me|telegram\.dog)/(\+?[A-Za-z0-9_]{3,64})(?:/\d+)?", re.I)
 URL_ANY_RE = re.compile(r"(?<![\w])((?:https?|wss?|ftp|sftp|ssh|mysql2?|mariadb|postgres(?:ql)?|pgsql|redis|rediss|amqps?|mongodb(?:\+srv)?|smtps?|imaps?|ldaps?|tg|socks[45]?|tcp)://[^\s\"'<>)\]\\`,;|}{]{3,400})", re.I)
 HOSTY_RE = re.compile(r"['\"]((?:api|www|app|gateway|smtp|mail|imap|pop3?|cdn|ws|wss|hook|webhook|bot|panel|admin|sms|track|tracking|pay|payment|merchant|node|rpc|proxy|socks|auth|sso|login|dev|stage|staging|test|m)\.(?:[a-z0-9-]+\.)+[a-z]{2,})(?::\d{2,5})?['\"]", re.I)
@@ -101,7 +106,7 @@ VERSION_LIKE_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
 # to a whole configuration value; VALUE_SHAPES_LOOSE finds them anywhere in text whose structure is unknown (an
 # unreachable blob, a code file), where key=value harvesting would only produce garbage
 _SHAPES: list[tuple[str, str, str, str]] = [
-    (r"\d{8,10}:[A-Za-z0-9_-]{35}", "messaging", "telegram", "Telegram bot token"),
+    (r"\d{8,10}:[A-Za-z0-9_-]{35,45}", "messaging", "telegram", "Telegram bot token"),
     (r"(?:AKIA|ASIA)[A-Z0-9]{16}", "cloud", "aws", "AWS access key id"),
     (r"(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{16,}", "payments", "stripe", "Stripe key"),
     (r"xox[baprs]-[A-Za-z0-9-]{10,}", "messaging", "slack", "Slack token"),
@@ -733,6 +738,1275 @@ def scan_endpoints(root: Path, log: Log) -> tuple[list[dict[str, Any]], list[dic
     return out_hosts, hits, sorted(idents.values(), key=lambda e: (e["type"], -e["count"]))
 
 
+
+
+# ------------------------------------------------------------------------------------------------ calls, webhooks and provider pivots
+PROVIDER_HOLDS: dict[str, str] = {
+    # messaging
+    "telegram": "Bot creator/owner user ID & phone (via numeric bot_id prefix before ':'), webhook target URL & delivery IP logs (getWebhookInfo), subscriber/admin chat_id list, channel/group metadata, and message/command history",
+    "discord": "Webhook creator user ID, guild (server) & channel IDs, account registration e-mail/phone/IP logs, and message delivery logs",
+    "slack": "Workspace ID, app/token creator account & e-mail, channel message history, and API caller IP logs",
+    "whatsapp": "Meta Business Account ID, registered sender phone number, WABA admin/billing accounts, and message delivery logs",
+    "meta": "Meta App/Business ID, developer account e-mail/phone, webhook callback URLs, and Graph API caller IP logs",
+    "xmpp": "Jabber server account registration, roster/contact list, offline message queue, and client connection IP/timestamp logs",
+    "viber": "Bot/public account owner phone & registration, webhook target URL, and message delivery logs",
+    "signal": "Registered account phone number and device link timestamps",
+    "matrix": "Homeserver account registration, room membership/events, device IDs, and access IP logs",
+    "line": "LINE Official Account / channel owner, webhook endpoint URL, and message delivery logs",
+    "max": "Bot/account owner registration phone/e-mail, webhook endpoint, and API caller IP logs",
+    # sms (virtual / activation vs transactional)
+    "sms-activate": "Account registration e-mail / Telegram handle, balance top-up payment history (crypto txids, cards, e-wallets), rented virtual phone numbers, activation timestamps, received SMS texts, and API caller IP logs",
+    "5sim": "Account registration e-mail / OAuth identity, balance deposit records (crypto/cards/wallets), leased virtual numbers, received OTP/SMS contents, and API access IPs",
+    "onlinesim": "Account registration e-mail/Telegram, payment top-up history, rented virtual numbers, received SMS messages, and API caller IPs",
+    "smshub": "Account registration e-mail, balance top-up records, activation number history, SMS contents, and API caller IPs",
+    "textverified": "Account e-mail & billing/crypto payment history, verification phone numbers rented, SMS texts received, and client IP logs",
+    "smspva": "Account registration e-mail, deposit payment history, rented numbers, SMS activation logs, and API caller IPs",
+    "grizzlysms": "Account registration e-mail/Telegram, balance top-up records, virtual number activations, and API caller IPs",
+    "daisysms": "Account registration e-mail, crypto/card deposit records, rented US numbers, SMS texts received, and API caller IPs",
+    "tigersms": "Account registration e-mail, balance top-up history, virtual number activations, and API caller IPs",
+    "herosms": "Account registration e-mail, balance top-up history, virtual number activations, and API caller IPs",
+    "getsmscode": "Account e-mail, balance top-up records, rented numbers, SMS logs, and API caller IPs",
+    "sms-man": "Account registration e-mail/Telegram, payment deposits, rented phone numbers, SMS texts, and API caller IPs",
+    "vak-sms": "Account registration e-mail/Telegram, balance top-up records, rented numbers, SMS logs, and API caller IPs",
+    "smsbower": "Account registration e-mail, balance top-up history, rented numbers, and API caller IPs",
+    "twilio": "Account holder KYC & billing method, subaccounts, leased sender phone numbers, CDRs (recipient numbers, timestamps, message bodies, status), webhook URLs, and API access IPs",
+    "vonage": "Account holder KYC & billing details, sender numbers/IDs, SMS/voice CDRs, webhook callback URLs, and API access IPs",
+    "plivo": "Account holder KYC & billing details, leased numbers, SMS/voice CDRs, webhook URLs, and API caller IPs",
+    "smsaero": "Account holder e-mail/phone & billing records, sender names, recipient SMS logs, and API caller IPs",
+    "smsc": "Account holder login/KYC & billing history, sender IDs, outbound SMS CDRs, and API client IPs",
+    "sms.ru": "Account holder phone/KYC & billing history, outbound SMS logs (recipients, text, timestamps), and API caller IPs",
+    "messagebird": "Account holder KYC & billing records, sender numbers, message logs, webhook URLs, and API caller IPs",
+    "telnyx": "Account holder KYC & billing method, messaging profiles, leased numbers, CDRs, webhook URLs, and API caller IPs",
+    # shipping
+    "aftership": "Account holder e-mail & billing records, submitted tracking numbers, carrier slugs, order/customer metadata attached to trackings, webhook callback URLs, and API caller IP logs",
+    "17track": "Account holder e-mail & billing tier, registered tracking numbers, carrier codes, webhook push URLs, and API caller IPs",
+    "trackingmore": "Account holder e-mail & billing records, submitted tracking numbers, webhook URLs, and API caller IPs",
+    "parcelsapp": "Account/API subscriber e-mail & billing, queried tracking numbers, and caller IP logs",
+    "parcelmonitor": "Account/API subscriber details, queried tracking numbers, webhook URLs, and caller IP logs",
+    "shippo": "Account holder KYC & payment method, shipping label purchases, sender & recipient street addresses/names/phones, tracking numbers, carrier accounts, and API/login IPs",
+    "easypost": "Account holder KYC & billing method, created shipments/labels, origin & destination addresses, customs forms, carrier accounts, webhook URLs, and API caller IPs",
+    "shipstation": "Account holder billing & connected store integrations, order & shipment history, recipient addresses, tracking numbers, and login/API IPs",
+    "stamps": "Account holder KYC & USPS postage purchase records, sender/recipient addresses, tracking numbers, and login/API IPs",
+    "pirateship": "Account holder e-mail & payment method, label purchase history, sender/recipient addresses, and login IPs",
+    "ups": "Shipper account number KYC & billing, label generation & pickup records, origin/destination addresses, and API caller IPs",
+    "usps": "WebTools/API user ID registration, mailer ID, address validation & tracking query logs, and caller IPs",
+    "fedex": "FedEx developer/shipper account KYC, meter number, shipment/tracking logs, and API caller IPs",
+    "dhl": "DHL shipper account KYC & billing, waybill/label creation logs, origin/destination addresses, and API caller IPs",
+    # payments & e-money
+    "stripe": "Merchant KYC identity, bank payout accounts & debit cards, full charge/payout/dispute ledger, customer billing & IP/fingerprint records, webhook endpoints, and dashboard/API IPs",
+    "paypal": "Merchant account KYC, linked bank accounts/cards, transaction & IPN history, counterparty e-mails, and login/API IPs",
+    "square": "Merchant KYC & linked bank accounts, location IDs, payment/payout ledger, and API/dashboard login IPs",
+    "braintree": "Merchant KYC & payout bank details, transaction vault/ledger, webhook endpoints, and API caller IPs",
+    "adyen": "Merchant company KYC, settlement bank accounts, payment/modification logs, webhook URLs, and API caller IPs",
+    "perfect money": "Account holder registration e-mail/phone/KYC, member ID & U/E/G purse numbers, internal transfer counterparties, voucher/exchanger deposit & withdrawal history, SCI/IPN status URLs, and login/API IPs",
+    "webmoney": "WMID passport/attestation KYC, Z/R/E purse history, transfer counterparties, merchant X-interface/LMI callback settings, and login/API IPs",
+    "qiwi": "Wallet phone number & passport KYC, P2P/merchant transfer history, linked cards, webhook URLs, and API caller IPs",
+    "yoomoney": "Wallet account KYC & phone/e-mail, incoming/outgoing transfer ledger, linked cards, HTTP notification URLs, and login/API IPs",
+    "payeer": "Account registration e-mail/phone/KYC, merchant shop ID, fiat/crypto exchange & transfer ledger, IPN status URLs, and login/API IPs",
+    "advcash": "Account holder KYC & e-mail, wallet transfer & card payout history, SCI callback URLs, and login/API IPs",
+    "volet": "Account holder KYC & e-mail, wallet transfer & payout history, SCI callback URLs, and login/API IPs",
+    "skrill": "Account holder KYC & bank/card links, merchant status_url callbacks, transfer ledger, and login IPs",
+    "payoneer": "Account holder KYC, receiving accounts, payer counterparties, withdrawal bank accounts, and login IPs",
+    "wise": "Account holder KYC, multi-currency borderless account IBANs, transfer counterparties, and API/login IPs",
+    "revolut": "Merchant/business account KYC, IBANs, counterparty transfers, webhook URLs, and API/login IPs",
+    # crypto
+    "nowpayments": "Merchant account e-mail/Telegram, created invoice logs, deposit addresses & on-chain txids, custody/payout withdrawal wallet addresses, IPN callback URLs, and API access IPs",
+    "cryptomus": "Merchant account e-mail/Telegram/KYC, merchant UUID, invoice & static wallet logs, withdrawal addresses & txids, webhook URLs, and API/login IPs",
+    "coinpayments": "Merchant account e-mail/KYC, merchant ID, IPN secret & callback URLs, deposit addresses, auto-sweep/withdrawal addresses, and login/API IPs",
+    "plisio": "Merchant account e-mail, shop configuration, invoice & txid history, payout wallet addresses, callback URLs, and API caller IPs",
+    "coingate": "Merchant account KYC, order/invoice ledger, settlement crypto/bank destinations, callback URLs, and API caller IPs",
+    "btcpay": "Store configuration, xpub / derivation scheme or hot wallet keys, invoice & payment logs, webhook endpoints",
+    "bitpay": "Merchant KYC, settlement wallet/bank details, invoice ledger, IPN callbacks, and API caller IPs",
+    "binance": "Account KYC identity, registration e-mail/phone, deposit & withdrawal addresses and txids, spot/P2P/Pay ledger, API key permissions, and login/API IPs",
+    "coinbase": "Account/Commerce KYC identity, e-mail/phone, deposit/withdrawal addresses, webhook endpoints, and API/login IPs",
+    "kraken": "Account KYC identity, deposit/withdrawal addresses & bank wires, trade ledger, and API/login IPs",
+    "kucoin": "Account registration e-mail/phone/KYC, deposit/withdrawal txids, trade ledger, and API/login IPs",
+    "bybit": "Account registration e-mail/phone/KYC, deposit/withdrawal txids, P2P counterparties, and API/login IPs",
+    "okx": "Account KYC, deposit/withdrawal addresses & txids, subaccounts, and API/login IPs",
+    "garantex": "Account registration phone/e-mail/KYC, ruble/USDT deposit & withdrawal codes, P2P/OTC counterparties, and login/API IPs",
+    "grinex": "Account registration details, deposit/withdrawal codes & txids, OTC counterparties, and login/API IPs",
+    "trongrid": "API key owner e-mail, queried TRON/TRC20 addresses & contract events, broadcast raw transactions, and caller IP logs",
+    "tron": "API key owner e-mail, queried TRON/TRC20 addresses & contract events, broadcast raw transactions, and caller IP logs",
+    "etherscan": "API key registration e-mail, queried Ethereum addresses/txns, and caller IP addresses",
+    "bscscan": "API key registration e-mail, queried BNB Chain addresses/txns, and caller IP addresses",
+    "infura": "Developer account e-mail & billing, project ID usage, RPC calls & broadcast transaction hashes, and caller IPs",
+    "alchemy": "Developer account e-mail & billing, app API key logs, webhook targets, broadcast txns, and caller IPs",
+    # mail
+    "sendgrid": "Account owner e-mail & billing, verified sender domains/identities, outbound email activity logs (recipients, subjects, timestamps), event webhooks, and SMTP/API client IPs",
+    "mailgun": "Account owner e-mail & billing, verified sending domains, message logs (recipients, subjects, delivery/bounce events), webhook URLs, and API/SMTP client IPs",
+    "postmark": "Account owner & server token configuration, verified signatures, full outbound/inbound message activity logs, and caller IPs",
+    "amazon ses": "AWS account ID & IAM principal, verified identities/domains, sending statistics, and CloudTrail/SES API caller IPs",
+    "brevo": "Account owner e-mail & billing, sender domains, transactional email/SMS logs, and API/SMTP client IPs",
+    "resend": "Account owner e-mail & billing, verified domains, outbound email logs (recipients, subjects, timestamps), and API caller IPs",
+    "gmail": "Google Account recovery phone/e-mail, OAuth/App-Password audit logs, Sent folder & SMTP message headers, and login IP history",
+    "office365": "Microsoft 365 tenant & mailbox owner, message trace logs, sign-in audit logs, and client IPs",
+    "yandex": "Yandex account phone/recovery e-mail, mailbox messages, app password creation, and SMTP/IMAP access IPs",
+    "mail.ru": "Mail.ru account phone/recovery e-mail, mailbox messages, and SMTP/IMAP access IPs",
+    "proton": "Account recovery e-mail/payment details, Proton Bridge/SMTP token usage, and authentication logs",
+    # cloud
+    "aws": "AWS Account ID, root/IAM user identity & billing, S3 bucket contents, CloudTrail API audit logs (access key ID, caller IPs, timestamps)",
+    "cloudflare r2": "Cloudflare account owner e-mail & billing, bucket objects, API token audit logs, and caller IPs",
+    "digitalocean spaces": "DigitalOcean account e-mail & billing method, Spaces bucket contents, access key logs, and login IPs",
+    "backblaze": "Backblaze account e-mail & billing, B2 bucket files, application key audit logs, and caller IPs",
+    "cloudinary": "Account owner e-mail & billing, cloud_name media assets, upload IP logs, and API key settings",
+    "dropbox": "Account owner e-mail & billing, stored files/shared links, app token audit logs, and device/IP logs",
+    "mega": "Account registration e-mail, stored encrypted blobs/links, payment records, and session IP history",
+    # proxy & anti-detect
+    "bright data": "Customer account KYC & billing method, zone configuration, proxy usage bandwidth/target logs, and client source IPs",
+    "oxylabs": "Customer account e-mail & billing, sub-user credentials, traffic usage logs, and client connection IPs",
+    "smartproxy": "Customer account e-mail & payment records, proxy sub-users, and client connection IPs",
+    "iproyal": "Customer account e-mail & crypto/card payments, proxy orders, and client connection IPs",
+    "soax": "Customer account e-mail & billing, whitelist IPs, proxy package usage, and client source IPs",
+    "proxy6": "Account registration e-mail, balance top-up records (wallets/cards), leased proxy IP:port list, and client IPs",
+    "proxy-seller": "Account e-mail, payment records, leased proxy IPs, and client connection logs",
+    "webshare": "Account e-mail & billing, proxy list assignments, and access IP logs",
+    "multilogin (anti-detect browser)": "Account e-mail & subscription payment records, synced browser profiles (cookies, fingerprints, proxy configs), team seats, and login IPs",
+    "gologin (anti-detect browser)": "Account e-mail & payment history, cloud browser profiles (cookies, saved logins, proxies), shared profile members, and API/login IPs",
+    "dolphin anty (anti-detect browser)": "Account e-mail/Telegram & subscription payment records, stored browser profiles, proxy list, team permissions, and login IPs",
+    "adspower (anti-detect browser)": "Account e-mail/phone & payment records, cloud-synced browser profiles, proxy configs, and login IPs",
+    "incogniton (anti-detect browser)": "Account e-mail & billing, stored browser profiles, and login IPs",
+    "octo browser (anti-detect)": "Account e-mail/Telegram & crypto/card payment records, browser profiles, tags, and login IPs",
+    # code-hosting & hosting
+    "github": "Account/organization owner e-mail, verified SSH keys, personal access token & deploy key usage logs, git push/fetch IP audit logs, private repositories, and Actions secrets",
+    "gitlab": "Account/group owner e-mail, SSH keys, PAT/deploy token logs, repository push/pull IP audit logs, and CI/CD variables",
+    "bitbucket": "Atlassian account e-mail, SSH keys, app passwords, repository access logs, and Pipelines secrets",
+    "cloudflare": "Account owner e-mail & billing, DNS zone records (true origin server IPs behind proxy), API token audit logs, Workers scripts, and login IPs",
+    "hetzner": "Customer KYC & billing/payment records, provisioned servers/IPs, reverse DNS, and Robot/Cloud console login IPs",
+    "digitalocean": "Account e-mail & billing, droplets/volumes/snapshots, SSH keys, and API/console login IPs",
+    "njalla": "Account registration e-mail/XMPP, crypto/PayPal top-up txids, domain DNS records & VPS origin IPs, and login logs",
+    "namecheap": "Account holder e-mail/phone & payment records (cards/BTC), domain registration/DNS history, and login IPs",
+    "aeza": "Account e-mail/Telegram, crypto/card deposit records, rented VPS IPs, and panel login IPs",
+    "reg.ru": "Account holder passport/phone/e-mail, payment history, domains & VPS services, and login IPs",
+    "timeweb": "Account holder e-mail/phone & payment methods, hosted sites/VPS instances, and control-panel login IPs",
+    # captcha, geo, ai
+    "2captcha": "Account registration e-mail, balance top-up records, solved captcha task logs (target site URLs/sitekeys, timestamps), and API caller IPs",
+    "rucaptcha": "Account registration e-mail, balance top-up records, solved captcha task logs, and API caller IPs",
+    "anti-captcha": "Account registration e-mail, funding payment records, captcha task domain logs, and API caller IPs",
+    "capmonster": "Account registration e-mail, balance top-ups, solved captcha domain/sitekey logs, and API caller IPs",
+    "capsolver": "Account registration e-mail, crypto/card top-ups, captcha task logs, and API caller IPs",
+    "ipinfo": "Account e-mail & billing tier, API token usage, queried IP addresses, and caller IPs",
+    "ip-api": "Pro subscriber e-mail & billing, queried IP logs, and caller IPs",
+    "maxmind": "Account holder e-mail & billing, GeoIP license key download/query logs, and caller IPs",
+    "ipqualityscore": "Account e-mail & billing, proxy/fraud lookup logs (queried IPs/emails/phones), and caller IPs",
+    "dadata": "Account e-mail/phone & billing, address/company lookup logs, and API caller IPs",
+    "openai": "Organization/account owner e-mail & billing card, API key creation/usage timestamps, caller IP logs, and retained request logs",
+    "anthropic": "Organization/account owner e-mail & billing card, API key usage logs, caller IPs, and workspace members",
+    "openrouter": "Account e-mail/OAuth identity, crypto/card credit top-ups, model generation logs, and caller IPs",
+    "deepseek": "Account e-mail/phone, balance top-up records, API key usage logs, and caller IPs",
+    "google gemini": "Google Cloud project owner & billing account, API key usage metrics, and caller IPs",
+}
+
+CLASS_HOLDS: dict[str, str] = {
+    "messaging": "Bot/webhook creator account, channel/chat IDs, message delivery history, and API caller IP logs",
+    "sms": "Account registration e-mail & balance top-up/billing records, sender/rented phone numbers, SMS CDRs/contents, and API caller IPs",
+    "shipping": "Account holder e-mail & billing records, submitted tracking numbers / shipping labels, sender & recipient addresses, webhook URLs, and API caller IPs",
+    "payments": "Merchant KYC & payout bank/wallet accounts, transaction ledger, IPN/webhook settings, and login/API IPs",
+    "crypto": "Account/merchant registration e-mail, deposit & withdrawal wallet addresses and on-chain txids, invoice logs, and API/login IPs",
+    "mail": "Account owner & billing details, verified sender domains, outbound message logs (recipients, timestamps), and SMTP/API client IPs",
+    "cloud": "Account holder billing & IAM identity, stored bucket/container objects, and access audit logs (caller IPs, keys)",
+    "proxy": "Customer account e-mail & payment records, leased proxy credentials/exit IPs, or synced anti-detect browser profiles, and client source IPs",
+    "code-hosting": "Account/organization owner e-mail, SSH keys, token audit logs, git push/clone IP logs, and private repositories",
+    "hosting": "Customer account e-mail & payment records, DNS zone records (origin IPs), VPS provisioning history, and login IPs",
+    "captcha": "Account registration e-mail, balance top-up records, target site URLs/sitekeys solved, and API caller IPs",
+    "geo": "Account owner e-mail & billing, API query volume, queried IPs/addresses, and caller IPs",
+    "ai": "Account/organization owner e-mail & billing method, API key usage timestamps, and caller IP logs",
+    "database": "Database server user accounts, table contents, query/connection logs, and client host IPs",
+    "queue": "Broker connection logs, queue/channel payloads, and client host IPs",
+    "ip": "Hosting/ASN subscriber & billing records for this IP, web/API server access logs (caller IP, timestamps, URI, User-Agent), and upstream application state",
+    "endpoint": "Domain registrar & DNS hosting records, web/API server access logs (caller IP, timestamps, URI, payload), TLS certificate history, and upstream database",
+    "other": "Domain registrar & hosting subscriber records, server access logs (caller IP, timestamps, request URI/body), and upstream application data",
+}
+
+
+def provider_holds(cls: str, service: str) -> str:
+    s = (service or "").lower().strip()
+    if s in PROVIDER_HOLDS:
+        return PROVIDER_HOLDS[s]
+    for k, v in PROVIDER_HOLDS.items():
+        if k in s or s in k and len(s) >= 4:
+            return v
+    return CLASS_HOLDS.get(cls or "other", CLASS_HOLDS["other"])
+
+
+_ENV_LOOKUP_RE = re.compile(
+    r"""(?:\bgetenv\s*\(\s*['"]([A-Za-z0-9_.-]+)['"]\s*\)|"""
+    r"""\$_(?:ENV|SERVER)\s*\[\s*['"]([A-Za-z0-9_.-]+)['"]\s*\]|"""
+    r"""\benv\s*\(\s*['"]([A-Za-z0-9_.-]+)['"](?:\s*,\s*['"]([^'"]*)['"])?\s*\)|"""
+    r"""\b(?:config|Config::get|\$this->getParameter|constant)\s*\(\s*['"]([A-Za-z0-9_.-]+)['"]\s*\)|"""
+    r"""\$(?:config|cfg|settings|env)\s*\[\s*['"]([A-Za-z0-9_.-]+)['"]\s*\]|"""
+    r"""\bos\.getenv\s*\(\s*['"]([A-Za-z0-9_.-]+)['"](?:\s*,\s*['"]([^'"]*)['"])?\s*\)|"""
+    r"""\bos\.environ\.get\s*\(\s*['"]([A-Za-z0-9_.-]+)['"](?:\s*,\s*['"]([^'"]*)['"])?\s*\)|"""
+    r"""\bos\.environ\s*\[\s*['"]([A-Za-z0-9_.-]+)['"]\s*\]|"""
+    r"""\b(?:settings|config)\.([A-Z][A-Z0-9_]{2,})\b|"""
+    r"""\b(?:settings|config)\s*\[\s*['"]([A-Za-z0-9_.-]+)['"]\s*\]|"""
+    r"""\bprocess\.env\.([A-Za-z_][A-Za-z0-9_]*)|"""
+    r"""\bprocess\.env\s*\[\s*['"]([A-Za-z0-9_.-]+)['"]\s*\]|"""
+    r"""\bimport\.meta\.env\.([A-Za-z_][A-Za-z0-9_]*))"""
+)
+
+
+def _call_args(text: str, open_paren_pos: int, limit: int = 800) -> tuple[list[str], int]:
+    """Parse balanced-parenthesis arguments starting at open_paren_pos ('(') -> (args_list, end_pos).
+    Handles nested function calls, arrays/dicts, multiline calls, and quoted strings without splitting on inner commas."""
+    n = min(len(text), open_paren_pos + limit)
+    i = open_paren_pos + 1
+    depth = 1
+    quote = ""
+    args: list[str] = []
+    cur: list[str] = []
+    while i < n and depth > 0:
+        ch = text[i]
+        if quote:
+            cur.append(ch)
+            if ch == "\\" and i + 1 < n:
+                cur.append(text[i + 1])
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+            i += 1
+            continue
+        if ch in ("'", '"', "`"):
+            quote = ch
+            cur.append(ch)
+        elif ch in ("(", "[", "{"):
+            depth += 1
+            cur.append(ch)
+        elif ch in (")", "]", "}"):
+            depth -= 1
+            if depth == 0:
+                break
+            cur.append(ch)
+        elif ch == "," and depth == 1:
+            args.append("".join(cur).strip())
+            cur = []
+        else:
+            cur.append(ch)
+        i += 1
+    last = "".join(cur).strip()
+    if last or args:
+        args.append(last)
+    return args, i
+
+
+def _build_config_index(values: list[dict[str, Any]], history_secrets: list[dict[str, Any]]) -> dict[str, Any]:
+    """Index live and historical config values by exact key, flat underscore key, and suffix so variable hosts and
+    credentials in code resolve back to the file and key that defines them."""
+    by_key: dict[str, dict[str, Any]] = {}
+    all_items: list[dict[str, Any]] = []
+    for r in values:
+        if r.get("placeholder") or not r.get("value"):
+            continue
+        entry = {
+            "key": r["key"], "value": r["value"], "file": r.get("file", ""), "line": r.get("line", 0),
+            "class": r.get("class", "other"), "service": r.get("service", ""), "example": bool(r.get("example")),
+            "from_history": False, "commit": "",
+        }
+        all_items.append(entry)
+        for k in {r["key"].lower(), r["key"].lower().replace(".", "_").replace("-", "_"), r["key"].split(".")[-1].lower()}:
+            if not k:
+                continue
+            prev = by_key.get(k)
+            if prev is None or (prev["example"] and not entry["example"]):
+                by_key[k] = entry
+    for h in history_secrets:
+        if not h.get("value"):
+            continue
+        entry = {
+            "key": h["key"], "value": h["value"], "file": f"{h.get('repo', '')}/{h.get('path', '')}".replace("//", "/"),
+            "line": 0, "class": h.get("class", "other"), "service": h.get("service", ""), "example": False,
+            "from_history": not bool(h.get("value_still_in_file")), "commit": (h.get("introduced_by_commit") or "")[:10],
+        }
+        all_items.append(entry)
+        for k in {h["key"].lower(), h["key"].lower().replace(".", "_").replace("-", "_")}:
+            if k and k not in by_key:
+                by_key[k] = entry
+    return {"by_key": by_key, "items": all_items}
+
+
+def _lookup_cfg(key: str, cfg_idx: dict[str, Any]) -> Optional[dict[str, Any]]:
+    by_key = cfg_idx.get("by_key") or {}
+    kl = (key or "").strip().lower()
+    if kl in by_key:
+        return by_key[kl]
+    flat = kl.replace(".", "_").replace("-", "_")
+    if flat in by_key:
+        return by_key[flat]
+    leaf = kl.split(".")[-1]
+    if leaf in by_key and len(leaf) >= 4:
+        return by_key[leaf]
+    return None
+
+
+def _resolve_expr(expr: str, file_vars: dict[str, tuple[str, str, str, int]], cfg_idx: dict[str, Any]) -> tuple[str, str, str, bool, list[int]]:
+    """Resolve an expression (URL argument, host argument, concatenated string, f-string, template literal) against
+    config keys and in-file variables -> (resolved_text, resolved_from, credential_key, used_variable_or_config, def_lines_used)."""
+    raw = (expr or "").strip()
+    if not raw:
+        return "", "", "", False, []
+    # Strip leading Python string prefixes (f"...", r"...", fr"...")
+    s = re.sub(r"^[frbuFRBU]{1,2}(?=['\"])", "", raw)
+    sources: list[str] = []
+    creds: list[str] = []
+    def_lines: list[int] = []
+    used_var = False
+
+    def repl_env(m: re.Match) -> str:
+        nonlocal used_var
+        used_var = True
+        groups = m.groups()
+        key = next((g for idx, g in enumerate(groups) if g is not None and idx not in (3, 7, 9)), "")
+        default = groups[3] or groups[7] or groups[9] or ""
+        hit = _lookup_cfg(key, cfg_idx)
+        if hit:
+            tag = f"config:{hit['key']} ({hit['file']})" + (f" [history {hit['commit']}]" if hit.get("from_history") else "")
+            if tag not in sources:
+                sources.append(tag)
+            if SECRET_KEY_RE.search(hit["key"]) and hit["key"] not in creds:
+                creds.append(hit["key"])
+            return hit["value"]
+        if default:
+            sources.append(f"config:{key} (default)")
+            return default
+        sources.append(f"config:{key} (unconfigured)")
+        if SECRET_KEY_RE.search(key) and key not in creds:
+            creds.append(key)
+        return f"__CFG_{key}__"
+
+    s = _ENV_LOOKUP_RE.sub(repl_env, s)
+
+    # shell / PHP / JS template / Python f-string variable references: ${VAR}, $var, {var}
+    def repl_var(m: re.Match) -> str:
+        nonlocal used_var
+        vname = m.group(1) or m.group(2) or m.group(3) or ""
+        if not vname or vname.startswith("_"):
+            return m.group(0)
+        if vname in file_vars:
+            used_var = True
+            val, src, ckey, dln = file_vars[vname]
+            if dln and dln not in def_lines:
+                def_lines.append(dln)
+            lbl = f"var:${vname}" + (f" <- {src}" if src else "")
+            if lbl not in sources:
+                sources.append(lbl)
+            if ckey and ckey not in creds:
+                creds.append(ckey)
+            return val
+        hit = _lookup_cfg(vname, cfg_idx)
+        if hit:
+            used_var = True
+            lbl = f"config:{hit['key']} ({hit['file']})"
+            if lbl not in sources:
+                sources.append(lbl)
+            if SECRET_KEY_RE.search(hit["key"]) and hit["key"] not in creds:
+                creds.append(hit["key"])
+            return hit["value"]
+        return m.group(0)
+
+    s = re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_.]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\}", repl_var, s)
+    # Unwrap any remaining ${...} or {...} around already-resolved values in f-strings / template literals
+    s = re.sub(r"\$\{([^{}\s]+)\}|\{([^{}:,\s]+)\}", lambda m: m.group(1) or m.group(2), s)
+
+    # If the expression is a single bare identifier (Python/JS variable name without $), check file_vars / cfg_idx
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", s):
+        if s in file_vars:
+            used_var = True
+            val, src, ckey, dln = file_vars[s]
+            if dln and dln not in def_lines:
+                def_lines.append(dln)
+            lbl = f"var:{s}" + (f" <- {src}" if src else "")
+            if lbl not in sources:
+                sources.append(lbl)
+            if ckey and ckey not in creds:
+                creds.append(ckey)
+            s = val
+        else:
+            hit = _lookup_cfg(s, cfg_idx)
+            if hit:
+                used_var = True
+                lbl = f"config:{hit['key']} ({hit['file']})"
+                if lbl not in sources:
+                    sources.append(lbl)
+                if SECRET_KEY_RE.search(hit["key"]) and hit["key"] not in creds:
+                    creds.append(hit["key"])
+                s = hit["value"]
+
+    # Collapse string concatenation operators (PHP ` . ` and Python/JS ` + `) without touching dots inside hosts/IPs
+    s = re.sub(r"""['"`]\s*(?:\.|\+)\s*['"`]""", "", s)
+    s = re.sub(r"""['"`]\s*(?:\.|\+)\s*""", "", s)
+    s = re.sub(r"""\s*(?:\.|\+)\s*['"`]""", "", s)
+    joined = re.sub(r"^[frbuFRBU]{1,2}(?=['\"])", "", s.strip()).strip("\"'`")
+    return joined, "; ".join(sources[:3]), ", ".join(creds[:3]), used_var, def_lines
+
+
+_ASSIGN_RE = re.compile(
+    r"""(?m)^\s*(?:(?:const|let|var|export\s+const|private|public|protected|readonly)\s+)?"""
+    r"""(?:\$([A-Za-z_][A-Za-z0-9_]{0,60})|(?:self|this)\.([A-Za-z_][A-Za-z0-9_]{0,60})|([A-Za-z_][A-Za-z0-9_]{1,60}))"""
+    r"""(?<![=!<>])\s*=\s*(?![=>])([^\n;]{2,400})"""
+)
+_DEFINE_ASSIGN_RE = re.compile(r"""\bdefine\s*\(\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]\s*,\s*([^)]+)\)""")
+
+
+def _extract_file_vars(text: str, cfg_idx: dict[str, Any]) -> dict[str, tuple[str, str, str, int]]:
+    """Collect local variable and constant assignments in a code file so call sites referencing $u, $host, base_url,
+    etc. resolve to the literal or config-backed URL/host."""
+    fvars: dict[str, tuple[str, str, str, int]] = {}
+    for m in _DEFINE_ASSIGN_RE.finditer(text):
+        k, rhs = m.group(1), m.group(2).strip()
+        ln = text.count("\n", 0, m.start()) + 1
+        val, src, ckey, _, _ = _resolve_expr(rhs, fvars, cfg_idx)
+        if val:
+            fvars[k] = (val, src, ckey, ln)
+    for m in _ASSIGN_RE.finditer(text):
+        vname = m.group(1) or m.group(2) or m.group(3) or ""
+        rhs = m.group(4).strip().rstrip(";").strip()
+        if not vname or vname in ("if", "for", "while", "return", "switch", "catch", "elif", "else", "case"):
+            continue
+        if re.match(r"^(?:curl_init|file_get_contents|fopen|fsockopen|pfsockopen|stream_socket_client|requests\.|httpx\.|fetch\(|axios\.)", rhs):
+            continue
+        ln = text.count("\n", 0, m.start()) + 1
+        val, src, ckey, used, _ = _resolve_expr(rhs, fvars, cfg_idx)
+        if val and ("://" in val or used or DOMAIN_RE.search(val) or IPV4_RE.search(val) or TG_TOKEN_RE.search(val) or val.startswith("/")):
+            fvars[vname] = (val, src, ckey, ln)
+    return fvars
+
+
+_LICENSE_BEACON_RE = re.compile(
+    r"(licen[cs]e|check_?licen[cs]e|verify_?licen[cs]e|activate_?licen[cs]e|heartbeat|beacon|phone_?home|"
+    r"kill_?switch|version_?check|update_?check|/gate\b|panel_?sync|register_?node|report_?status|hwid|machine_?id)",
+    re.I,
+)
+_PAYLOAD_KEY_RE = re.compile(r"""['"]([A-Za-z_][A-Za-z0-9_.-]{1,40})['"]\s*(?:=>|:\s*(?!//))""")
+_PAYLOAD_VAR_RE = re.compile(r"""(\$_(?:POST|GET|REQUEST|SERVER|COOKIE)\s*\[\s*['"][^'"]+['"]\s*\]|\$[A-Za-z_][A-Za-z0-9_]{1,32})""")
+_HEADER_NAME_RE = re.compile(r"""['"]([A-Za-z][A-Za-z0-9-]{2,40})\s*:\s*(?!//)[^'"]*['"]""")
+_QUERY_KEY_RE = re.compile(r"""[?&]([A-Za-z0-9_.-]{2,32})=""")
+
+
+def _extract_payload_and_creds(window: str, url: str, cfg_idx: dict[str, Any]) -> tuple[str, str]:
+    """Summarize payload keys, variables, query parameters and headers sent in a call window, and identify any
+    referenced credential keys."""
+    keys: list[str] = []
+    vars_: list[str] = []
+    hdrs: list[str] = []
+    creds: list[str] = []
+
+    for m in _QUERY_KEY_RE.finditer(url or ""):
+        k = m.group(1)
+        if k not in keys:
+            keys.append(k)
+    for m in _HEADER_NAME_RE.finditer(window):
+        h = m.group(1)
+        if h.lower() not in ("content-type", "accept", "user-agent", "cache-control", "connection", "content-length", "http", "https") and h not in hdrs:
+            hdrs.append(h)
+    for m in _PAYLOAD_KEY_RE.finditer(window):
+        k = m.group(1)
+        if k.lower() in ("http", "https", "method", "header", "headers", "content", "body", "json", "data", "form_params", "timeout", "verify", "url", "uri") or k in hdrs:
+            continue
+        if k not in keys:
+            keys.append(k)
+    for m in _PAYLOAD_VAR_RE.finditer(window):
+        v = re.sub(r"\s+", "", m.group(1))
+        if v.lower() in ("$ch", "$curl", "$hb", "$res", "$resp", "$response", "$err", "$errno", "$status", "$http", "$client", "$this", "$u", "$url", "$uri", "$sock"):
+            continue
+        if v not in vars_:
+            vars_.append(v)
+    for m in _ENV_LOOKUP_RE.finditer(window):
+        groups = m.groups()
+        k = next((g for idx, g in enumerate(groups) if g is not None and idx not in (3, 7, 9)), "")
+        if k and (SECRET_KEY_RE.search(k) or _lookup_cfg(k, cfg_idx)) and k not in creds:
+            creds.append(k)
+    tm = TG_TOKEN_RE.search(url or "") or TG_TOKEN_RE.search(window)
+    if tm:
+        tok = tm.group(1)
+        matched_k = ""
+        for it in cfg_idx.get("items") or []:
+            if it["value"] == tok:
+                matched_k = it["key"]
+                break
+        lbl = matched_k or f"bot{tok[:10]}…"
+        if lbl not in creds:
+            creds.append(lbl)
+
+    parts: list[str] = []
+    if keys:
+        parts.append("keys: " + ", ".join(keys[:8]))
+    if vars_:
+        parts.append("vars: " + ", ".join(vars_[:6]))
+    if hdrs:
+        parts.append("headers: " + ", ".join(hdrs[:4]))
+    return "; ".join(parts), ", ".join(creds[:4])
+
+
+def _host_and_url_from_resolved(resolved: str, raw_expr: str) -> tuple[str, str]:
+    """Extract (host, clean_url_or_target) from a resolved target string."""
+    s = (resolved or "").strip().strip("\"'`")
+    # Check unconfigured config placeholder FIRST so __CFG_X__ is never parsed as a literal hostname
+    m_cfg = re.search(r"__CFG_([A-Za-z0-9_.-]+)__", s)
+    if m_cfg:
+        clean_u = re.sub(r"__CFG_([A-Za-z0-9_.-]+)__", r"(config:\1)", s)
+        return f"(config:{m_cfg.group(1)})", clean_u[:300]
+    m = URL_ANY_RE.search(s)
+    if m:
+        u = m.group(1).rstrip(".,;:'\")]}")
+        try:
+            sp = urlsplit(u)
+            h = (sp.hostname or "").lower().strip(".")
+            if sp.port and IPV4_RE.fullmatch(h):
+                h = f"{h}:{sp.port}"
+            return h, u
+        except ValueError:
+            pass
+    m_ip = IP_PORT_RE.search(s)
+    if m_ip:
+        ip = m_ip.group(1)
+        port = m_ip.group(2)
+        hp = f"{ip}:{port}" if port else ip
+        return hp, s[:300]
+    m_dom = DOMAIN_RE.search(s)
+    if m_dom and "." in m_dom.group(1):
+        cand = m_dom.group(1).lower()
+        tld = cand.rsplit(".", 1)[-1]
+        if tld not in ("py", "php", "js", "ts", "sh", "json", "env", "get", "post", "request", "body", "headers", "format", "join"):
+            return cand, s[:300]
+    raw_clean = re.sub(r"\s+", " ", raw_expr.strip())[:120]
+    return f"(expr:{raw_clean[:60]})" if raw_clean else "", raw_clean
+
+
+# Call patterns across languages (open-paren anchored for balanced argument extraction)
+_PHP_CURL_INIT_OPEN_RE = re.compile(r"\bcurl_init\s*\(")
+_PHP_CURLOPT_URL_RE = re.compile(r"\bCURLOPT_URL\s*(?:,|=?>)\s*([^\n,);\]]+)")
+_PHP_FGC_OPEN_RE = re.compile(r"\b(file_get_contents|fopen)\s*\(")
+_PHP_HTTP_CLIENT_OPEN_RE = re.compile(
+    r"(?:\bHttp\s*::\s*(?:withToken\([^)]*\)\s*->\s*|withHeaders\([^)]*\)\s*->\s*|asForm\(\)\s*->\s*|timeout\([^)]*\)\s*->\s*)*"
+    r"|\$(?:client|http|guzzle|api)\w*\s*->\s*|\bwp_remote_)"
+    r"(get|post|put|delete|patch|head|request|send)\s*\(",
+    re.I,
+)
+_PY_HTTP_OPEN_RE = re.compile(
+    r"\b(requests|httpx|urllib\.request|aiohttp|\w*session|\w*client)\s*\.\s*(get|post|put|delete|patch|head|request|urlopen|Request)\s*\("
+)
+_JS_HTTP_OPEN_RE = re.compile(
+    r"(?:\b(fetch|axios|got)\s*\(|\b(axios|got|http|https|superagent)\s*\.\s*(get|post|put|delete|patch|request)\s*\(|\bnew\s+(WebSocket)\s*\()"
+)
+_GO_RB_HTTP_OPEN_RE = re.compile(
+    r"\b(?:(http)\.(Get|Post|PostForm|NewRequest|NewRequestWithContext)|(Net::HTTP|Faraday|RestClient|HttpClient)\.(get|post|put|delete|get_response|PostAsync|GetAsync))\s*\("
+)
+_SOCKET_OPEN_RE = re.compile(
+    r"\b(p?fsockopen|stream_socket_client|socket_connect|socket\.create_connection|\w*sock\w*\.connect|(?:net|tls)\.(?:connect|createConnection))\s*\("
+)
+_MAIL_CALL_OPEN_RE = re.compile(
+    r"(?:\b(mail|wp_mail)\s*\(|(?:\$\w*mail\w*|\bMail|\bMailer)\s*(?:->|::)\s*(send|to|raw|queue)\s*\("
+    r"|\bsmtplib\.(SMTP(?:_SSL)?)\s*\(|\b(nodemailer\.createTransport)\s*\(|\.?(sendMail|sendmail|send_message)\s*\()"
+)
+_TG_DISCORD_SDK_OPEN_RE = re.compile(
+    r"(?:(?:\$(?:bot|tg|telegram)\w*|\b(?:bot|telegram|tg|dispatcher|Telegram))\s*(?:->|::|\.)\s*"
+    r"(send_?message|send_?document|send_?photo|send_?video|send_?audio|send_?media_?group|forward_?message|set_?webhook|get_?updates|"
+    r"sendMessage|sendDocument|sendPhoto|sendVideo|sendAudio|sendMediaGroup|forwardMessage|setWebhook|getUpdates)\s*\("
+    r"|\bnew\s+(DiscordWebhook|WebhookClient)\s*\()"
+)
+_SHELL_CURL_WGET_RE = re.compile(r"(?<![\w/.-])(curl|wget)\b\s+([^\n`]{3,400})")
+_SHELL_PIPE_EXEC_RE = re.compile(
+    r"(?:\|\s*(?:sudo\s+)?(?:/usr/bin/|/bin/)?(?:ba|z|da|k|a)?sh\b|\|\s*(?:sudo\s+)?(?:python3?|php|perl|ruby|node)\b|"
+    r"(?:ba|z)?sh\s+-c\s+['\"]?\$\((?:curl|wget)\b|eval\s+['\"]?\$\((?:curl|wget)\b|&&\s*chmod\s+\+x\b)"
+)
+_CRON_LINE_RE = re.compile(r"^\s*((?:@[a-zA-Z]+|(?:[\d*,/-]+\s+){5}))(?:([a-zA-Z0-9_-]+)\s+)?(.+)$")
+_SCHED_METHOD_RE = re.compile(r"->\s*(?:command|exec|call)\s*\(\s*([^)]+)\).*?->\s*(cron\s*\([^)]+\)|every[A-Za-z]+\s*\([^)]*\)|hourly\s*\(|daily\s*\(|weekly\s*\()", re.S)
+
+# Inbound webhook / IPN patterns
+_WEBHOOK_ROUTE_RE = re.compile(
+    r"""(?:\bRoute\s*::\s*(post|get|any|match)\s*\(\s*['"]([^'"]*(?:webhook|ipn|callback|notify|hook|bot)[^'"]*)['"]|"""
+    r"""#\[Route\s*\(\s*['"]([^'"]*(?:webhook|ipn|callback|notify|hook|bot)[^'"]*)['"]|"""
+    r"""@Route\s*\(\s*['"]([^'"]*(?:webhook|ipn|callback|notify|hook|bot)[^'"]*)['"]|"""
+    r"""@(?:app|router|bp)\.(post|get|route|all)\s*\(\s*['"]([^'"]*(?:webhook|ipn|callback|notify|hook|bot)[^'"]*)['"]|"""
+    r"""\b(?:app|router)\.(post|get|all|use)\s*\(\s*['"]([^'"]*(?:webhook|ipn|callback|notify|hook|bot)[^'"]*)['"]|"""
+    r"""\bpath\s*\(\s*['"]([^'"]*(?:webhook|ipn|callback|notify|hook|bot)[^'"]*)['"])""",
+    re.I,
+)
+_WEBHOOK_SIG_PATTERNS: list[tuple[re.Pattern, str, str, str, str]] = [
+    (re.compile(r"HTTP_STRIPE_SIGNATURE|Stripe-Signature|Webhook::constructEvent|stripe\.Webhook\.construct_event", re.I), "webhook", "payments", "stripe", "Stripe-Signature"),
+    (re.compile(r"_notify-validate|HTTP_PAYPAL_TRANSMISSION_SIG", re.I), "ipn", "payments", "paypal", "PayPal IPN verify"),
+    (re.compile(r"PAYMENT_BATCH_NUM|V2_HASH|PAYEE_ACCOUNT", re.I), "ipn", "payments", "perfect money", "V2_HASH (MD5)"),
+    (re.compile(r"x-nowpayments-sig|HTTP_X_NOWPAYMENTS_SIG", re.I), "ipn", "crypto", "nowpayments", "x-nowpayments-sig (HMAC)"),
+    (re.compile(r"HTTP_HMAC.*ipn_mode|ipn_mode.*HTTP_HMAC", re.I | re.S), "ipn", "crypto", "coinpayments", "HTTP_HMAC"),
+    (re.compile(r"BTCPay-Sig|HTTP_BTCPAY_SIG", re.I), "webhook", "crypto", "btcpay", "BTCPay-Sig"),
+    (re.compile(r"X-Telegram-Bot-Api-Secret-Token|HTTP_X_TELEGRAM_BOT_API_SECRET_TOKEN", re.I), "bot-webhook", "messaging", "telegram", "X-Telegram-Bot-Api-Secret-Token"),
+    (re.compile(r"['\"]update_id['\"].*['\"](?:message|callback_query)['\"]|['\"]callback_query['\"].*['\"]chat['\"]", re.I | re.S), "bot-webhook", "messaging", "telegram", "Telegram Update JSON"),
+    (re.compile(r"aftership-hmac-sha256|HTTP_AFTERSHIP_HMAC_SHA256", re.I), "webhook", "shipping", "aftership", "aftership-hmac-sha256"),
+    (re.compile(r"X-Twilio-Signature|HTTP_X_TWILIO_SIGNATURE", re.I), "webhook", "sms", "twilio", "X-Twilio-Signature"),
+    (re.compile(r"X-Hub-Signature-256|HTTP_X_HUB_SIGNATURE_256", re.I), "webhook", "code-hosting", "github", "X-Hub-Signature-256"),
+    (re.compile(r"m_operation_id.*m_sign|m_sign.*m_operation_id", re.I | re.S), "ipn", "payments", "payeer", "m_sign (SHA256)"),
+    (re.compile(r"notification_type.*sha1_hash|sha1_hash.*notification_type", re.I | re.S), "ipn", "payments", "yoomoney", "sha1_hash"),
+]
+_WEBHOOK_FILENAME_RE = re.compile(r"(webhook|ipn|callback|notify|bot_?hook|payment_?status)", re.I)
+_INPUT_FIELD_RE = re.compile(
+    r"""(?:\$_(?:POST|GET|REQUEST)\s*\[\s*['"]([A-Za-z0-9_.-]{2,40})['"]\s*\]|"""
+    r"""\$(?:data|payload|input|update|body|event|req|request)\s*\[\s*['"]([A-Za-z0-9_.-]{2,40})['"]\s*\]|"""
+    r"""\b(?:data|payload|body|req\.body|request\.json)\.(?:get\s*\(\s*['"]([A-Za-z0-9_.-]{2,40})['"]\)|([A-Za-z0-9_]{2,40})))"""
+)
+
+
+def scan_calls(
+    root: Path,
+    values: list[dict[str, Any]],
+    history_secrets: list[dict[str, Any]],
+    hosts: list[dict[str, Any]],
+    hits: list[dict[str, Any]],
+    idents: list[dict[str, Any]],
+    log: Log,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Scan code, config and cron files for outbound network/service calls (including variable hosts resolved from
+    configuration) and inbound webhook/IPN handlers -> (calls, webhooks)."""
+    t0 = time.time()
+    cfg_idx = _build_config_index(values, history_secrets)
+    calls: list[dict[str, Any]] = []
+    webhooks: list[dict[str, Any]] = []
+    host_map: dict[str, dict[str, Any]] = {h["host"]: h for h in hosts}
+    hit_keys: set[tuple[str, str]] = {(x["host"], x["file"]) for x in hits}
+
+    default_mail_host = ""
+    default_tg_key = ""
+    for it in cfg_idx.get("items") or []:
+        if it["class"] == "mail" and not default_mail_host:
+            h = _host_of(it["value"])
+            if h:
+                default_mail_host = h
+        if it["service"] == "telegram" and not default_tg_key and TG_TOKEN_RE.search(it["value"]):
+            default_tg_key = it["key"]
+
+    def ensure_host_in_endpoints(host: str, url: str, rel: str, line: int, excerpt: str, how: str) -> tuple[str, str]:
+        hclean = (host or "").lower().strip(".")
+        if not hclean or hclean.startswith("("):
+            return "endpoint", ""
+        base_h = hclean.split(":")[0] if re.match(r"^[\d.]+:\d+$", hclean) else hclean
+        cls, svc = classify_host(base_h)
+        if cls in ("noise", "internal"):
+            return cls, svc
+        existing = host_map.get(hclean)
+        if existing is None:
+            rec = {
+                "host": hclean, "class": cls, "service": svc, "hits": 1, "files_n": 1, "files": [rel],
+                "first_file": rel, "first_line": line, "example": (url or hclean)[:300], "schemes": how,
+            }
+            hosts.append(rec)
+            host_map[hclean] = rec
+            hit_keys.add((hclean, rel))
+            if len(hits) < 200_000:
+                hits.append({"host": hclean, "class": cls, "service": svc, "url": (url or hclean)[:500], "file": rel, "line": line, "excerpt": excerpt[:200], "how": how})
+        elif (hclean, rel) not in hit_keys:
+            existing["hits"] += 1
+            existing["files_n"] = existing.get("files_n", len(existing["files"])) + 1
+            if rel not in existing["files"] and len(existing["files"]) < 6:
+                existing["files"].append(rel)
+            hit_keys.add((hclean, rel))
+            if len(hits) < 200_000:
+                hits.append({"host": hclean, "class": cls, "service": svc, "url": (url or hclean)[:500], "file": rel, "line": line, "excerpt": excerpt[:200], "how": how})
+        return cls, svc
+
+    def add_call(
+        rel: str, line: int, kind: str, mechanism: str, method: str, raw_target: str, window: str, excerpt: str,
+        file_vars: dict[str, tuple[str, str, str, int]], consumed_lines: set[int], extra_flags: Optional[list[str]] = None,
+        forced_host: str = "", forced_cls: str = "", forced_svc: str = "", schedule: str = "",
+    ):
+        resolved, res_from, ckey_from_target, used_var, def_lns = _resolve_expr(raw_target, file_vars, cfg_idx)
+        for dln in def_lns:
+            consumed_lines.add(dln)
+        host, clean_url = _host_and_url_from_resolved(resolved, raw_target)
+        if forced_host and (not host or host.startswith("(")):
+            host = forced_host
+        base_h = host.split(":")[0] if re.match(r"^[\d.]+:\d+$", host) else host
+        cls, svc = classify_host(base_h) if host and not host.startswith("(") else (forced_cls or "endpoint", forced_svc or "")
+        if forced_cls and cls in ("other", "endpoint"):
+            cls = forced_cls
+        if forced_svc and not svc:
+            svc = forced_svc
+        if cls == "noise":
+            return
+        if used_var and host and not host.startswith("("):
+            ensure_host_in_endpoints(host, clean_url, rel, line, excerpt, "call (config)" if "config:" in res_from else "call (var)")
+        payload, ckey_win = _extract_payload_and_creds(window, clean_url, cfg_idx)
+        if schedule:
+            payload = f"schedule: {schedule}" + (f"; {payload}" if payload else "")
+        cred_key = ", ".join(dict.fromkeys([c for c in (ckey_from_target, ckey_win) if c]))
+        flags: list[str] = list(extra_flags or [])
+        if used_var and "variable-host" not in flags:
+            flags.append("variable-host")
+        if svc == "telegram" or "api.telegram.org" in host or kind == "telegram":
+            kind = "telegram"
+            cls, svc = "messaging", "telegram"
+            if "telegram-notify" not in flags:
+                flags.append("telegram-notify")
+            m_act = re.search(r"/bot[^/]+/([A-Za-z]+)", clean_url)
+            if m_act and m_act.group(1) not in payload:
+                payload = f"action: {m_act.group(1)}" + (f"; {payload}" if payload else "")
+            if not cred_key and default_tg_key:
+                cred_key = default_tg_key
+        elif svc == "discord" or "discord.com/api/webhooks" in clean_url or "discordapp.com/api/webhooks" in clean_url or kind == "discord":
+            kind = "discord"
+            cls, svc = "messaging", "discord"
+            if "discord-webhook" not in flags:
+                flags.append("discord-webhook")
+        if _LICENSE_BEACON_RE.search(clean_url) or _LICENSE_BEACON_RE.search(window) or _LICENSE_BEACON_RE.search(rel):
+            if "license-check" not in flags and "heartbeat" not in flags:
+                flags.append("license-check" if re.search(r"licen[cs]e|activate|hwid", clean_url + " " + window, re.I) else "heartbeat")
+            if kind == "http":
+                kind = "license/heartbeat"
+        calls.append({
+            "file": rel, "line": line, "kind": kind, "mechanism": mechanism, "method": method.upper(),
+            "host": host or "(dynamic)", "url_or_target": (clean_url or raw_target.strip())[:400],
+            "class": cls, "service": svc, "resolved_from": res_from, "payload": payload[:300],
+            "credential_key": cred_key[:160], "flags": ", ".join(flags), "excerpt": excerpt.strip()[:240],
+        })
+
+    for p in _code_files(root):
+        text = _read_text(p)
+        if not text:
+            continue
+        rel = _rel(p, root)
+        nm = p.name.lower()
+        ext = os.path.splitext(nm)[1]
+        is_cron_file = nm in ("crontab",) or "cron" in rel.lower()
+        is_shell_file = ext in (".sh", ".bash", ".bat", ".cmd", ".ps1") or nm in ("dockerfile", "makefile", "procfile", "crontab")
+        is_code = ext in (".php", ".js", ".ts", ".tsx", ".jsx", ".mjs", ".cjs", ".vue", ".py", ".rb", ".go", ".java", ".kt", ".cs", ".rs", ".sh", ".bash")
+        if not is_code and not is_cron_file and not is_shell_file:
+            continue
+
+        lines = text.splitlines()[:50000]
+        file_vars = _extract_file_vars(text[:300_000], cfg_idx)
+        consumed_lines: set[int] = set()
+
+        def get_curl_window(ln: int, max_span: int = 16) -> tuple[str, int]:
+            out_l: list[str] = []
+            end_ln = ln
+            for k in range(ln - 1, min(len(lines), ln - 1 + max_span)):
+                if k > ln - 1 and re.search(r"\bcurl_init\s*\(", lines[k]):
+                    break
+                out_l.append(lines[k])
+                end_ln = k + 1
+                if re.search(r"\b(?:curl_exec|curl_close|curl_multi_add_handle)\s*\(", lines[k]):
+                    break
+            return "\n".join(out_l), end_ln
+
+        def mark_span(start_pos: int, end_pos: int) -> tuple[int, str]:
+            ln1 = text.count("\n", 0, start_pos) + 1
+            ln2 = text.count("\n", 0, max(start_pos, end_pos)) + 1
+            for k in range(ln1, ln2 + 1):
+                consumed_lines.add(k)
+            win = "\n".join(lines[max(0, ln1 - 1):min(len(lines), ln2 + 1)])
+            return ln1, win
+
+        # 1. PHP cURL blocks & HTTP calls
+        if ext in (".php", ".inc", ".tpl"):
+            for m in _PHP_CURL_INIT_OPEN_RE.finditer(text):
+                args, end_p = _call_args(text, m.end() - 1)
+                ln = text.count("\n", 0, m.start()) + 1
+                win, end_ln = get_curl_window(ln, 16)
+                arg = args[0] if args and args[0] else ""
+                if not arg:
+                    mu = _PHP_CURLOPT_URL_RE.search(win)
+                    arg = mu.group(1).strip() if mu else ""
+                method = "GET"
+                if re.search(r"CURLOPT_POST\b\s*(?:,|=?>)\s*(?:true|1)|CURLOPT_POSTFIELDS", win, re.I):
+                    method = "POST"
+                mc = re.search(r"CURLOPT_CUSTOMREQUEST\s*(?:,|=?>)\s*['\"]([A-Z]+)['\"]", win)
+                if mc:
+                    method = mc.group(1)
+                for k in range(ln, end_ln + 1):
+                    consumed_lines.add(k)
+                add_call(rel, ln, "http", "php:curl", method, arg, win, lines[ln - 1] if ln <= len(lines) else "", file_vars, consumed_lines,
+                         extra_flags=["cron"] if is_cron_file else None)
+
+            for m in _PHP_CURLOPT_URL_RE.finditer(text):
+                ln = text.count("\n", 0, m.start()) + 1
+                if ln in consumed_lines:
+                    continue
+                win, end_ln = get_curl_window(max(1, ln - 2), 12)
+                method = "POST" if re.search(r"CURLOPT_POST|CURLOPT_POSTFIELDS", win) else "GET"
+                for k in range(ln, end_ln + 1):
+                    consumed_lines.add(k)
+                add_call(rel, ln, "http", "php:curl", method, m.group(1).strip(), win, lines[ln - 1] if ln <= len(lines) else "", file_vars, consumed_lines,
+                         extra_flags=["cron"] if is_cron_file else None)
+
+            for m in _PHP_FGC_OPEN_RE.finditer(text):
+                fn = m.group(1)
+                args, end_p = _call_args(text, m.end() - 1)
+                if not args or not args[0]:
+                    continue
+                arg = args[0]
+                ctx_arg = args[2] if len(args) >= 3 else ""
+                if arg in ("'php://input'", '"php://input"', "STDIN"):
+                    continue
+                resolved, _, _, used, _ = _resolve_expr(arg, file_vars, cfg_idx)
+                ln, win = mark_span(m.start(), end_p)
+                if "://" in resolved and re.match(r"^(https?|ftp|sftp|ssh|tcp|tls|ssl)://", resolved, re.I) or used and ("http" in resolved.lower() or _host_and_url_from_resolved(resolved, arg)[0] and not _host_and_url_from_resolved(resolved, arg)[0].startswith("(")) or ctx_arg and "http" in win.lower():
+                    method = "POST" if re.search(r"['\"]method['\"]\s*=>\s*['\"]POST['\"]", win, re.I) else "GET"
+                    add_call(rel, ln, "http", f"php:{fn}", method, arg, win, lines[ln - 1] if ln <= len(lines) else "", file_vars, consumed_lines,
+                             extra_flags=["cron"] if is_cron_file else None)
+
+            for m in _PHP_HTTP_CLIENT_OPEN_RE.finditer(text):
+                verb = m.group(1).upper()
+                args, end_p = _call_args(text, m.end() - 1)
+                if not args:
+                    continue
+                if verb in ("REQUEST", "SEND") and len(args) >= 2 and re.fullmatch(r"['\"][A-Za-z]+['\"]", args[0]):
+                    verb = args[0].strip("\"'").upper()
+                    target_arg = args[1]
+                else:
+                    target_arg = args[0]
+                ln, win = mark_span(m.start(), end_p)
+                add_call(rel, ln, "http", "php:http-client", verb if verb not in ("REQUEST", "SEND") else "POST", target_arg, win,
+                         lines[ln - 1] if ln <= len(lines) else "", file_vars, consumed_lines, extra_flags=["cron"] if is_cron_file else None)
+
+        # 2. Python HTTP calls
+        if ext == ".py":
+            for m in _PY_HTTP_OPEN_RE.finditer(text):
+                lib, verb = m.group(1), m.group(2)
+                args, end_p = _call_args(text, m.end() - 1)
+                if not args:
+                    continue
+                if verb.lower() == "request" and len(args) >= 2:
+                    method = args[0].strip("\"'").upper()
+                    target_arg = args[1]
+                else:
+                    method = "GET" if verb.lower() in ("get", "urlopen", "head") else ("POST" if verb.lower() in ("post", "request") else verb.upper())
+                    target_arg = args[0]
+                ln, win = mark_span(m.start(), end_p)
+                add_call(rel, ln, "http", f"py:{lib}.{verb}", method, target_arg, win, lines[ln - 1] if ln <= len(lines) else "", file_vars, consumed_lines,
+                         extra_flags=["cron"] if is_cron_file else None)
+
+        # 3. JS / TS HTTP & WebSocket calls
+        if ext in (".js", ".ts", ".tsx", ".jsx", ".mjs", ".cjs", ".vue"):
+            for m in _JS_HTTP_OPEN_RE.finditer(text):
+                args, end_p = _call_args(text, m.end() - 1)
+                if not args:
+                    continue
+                ln, win = mark_span(m.start(), end_p)
+                target_arg = args[0]
+                if m.group(1):
+                    lib = m.group(1)
+                    mm = re.search(r"method\s*:\s*['\"]([A-Za-z]+)['\"]", win, re.I)
+                    method = mm.group(1).upper() if mm else "GET"
+                    mech = f"js:{lib}"
+                elif m.group(2):
+                    lib, verb = m.group(2), m.group(3)
+                    method = verb.upper() if verb.lower() != "request" else "POST"
+                    mech = f"js:{lib}.{verb}"
+                else:
+                    method = "WS"
+                    mech = "js:WebSocket"
+                add_call(rel, ln, "http", mech, method, target_arg, win, lines[ln - 1] if ln <= len(lines) else "", file_vars, consumed_lines)
+
+        # 4. Go / Ruby / Java / C# HTTP calls
+        if ext in (".go", ".rb", ".java", ".kt", ".cs"):
+            for m in _GO_RB_HTTP_OPEN_RE.finditer(text):
+                verb = (m.group(2) or m.group(4) or "GET").upper()
+                args, end_p = _call_args(text, m.end() - 1)
+                if not args:
+                    continue
+                if "NEWREQUEST" in verb and len(args) >= 2:
+                    method = args[0].strip("\"'").upper()
+                    target_arg = args[1]
+                else:
+                    method = "POST" if "POST" in verb else "GET"
+                    target_arg = args[0]
+                ln, win = mark_span(m.start(), end_p)
+                add_call(rel, ln, "http", f"{ext.lstrip('.')}:http", method, target_arg, win, lines[ln - 1] if ln <= len(lines) else "", file_vars, consumed_lines)
+
+        # 5. Telegram / Discord SDK calls
+        for m in _TG_DISCORD_SDK_OPEN_RE.finditer(text):
+            ln_check = text.count("\n", 0, m.start()) + 1
+            if ln_check in consumed_lines:
+                continue
+            args, end_p = _call_args(text, m.end() - 1)
+            ln, win = mark_span(m.start(), end_p)
+            if m.group(1):
+                act = m.group(1)
+                add_call(rel, ln, "telegram", f"sdk:{act}", "POST", f"https://api.telegram.org/{act}", win + " " + ", ".join(args),
+                         lines[ln - 1] if ln <= len(lines) else "", file_vars, consumed_lines, extra_flags=["telegram-notify"],
+                         forced_host="api.telegram.org", forced_cls="messaging", forced_svc="telegram")
+            else:
+                cls_nm = m.group(2)
+                add_call(rel, ln, "discord", f"sdk:{cls_nm}", "POST", args[0] if args else "", win,
+                         lines[ln - 1] if ln <= len(lines) else "", file_vars, consumed_lines, extra_flags=["discord-webhook"],
+                         forced_host="discord.com", forced_cls="messaging", forced_svc="discord")
+
+        # 6. Sockets
+        for m in _SOCKET_OPEN_RE.finditer(text):
+            fn = m.group(1)
+            args, end_p = _call_args(text, m.end() - 1)
+            if not args:
+                continue
+            ln, win = mark_span(m.start(), end_p)
+            target_arg = args[0]
+            if len(args) >= 2 and re.fullmatch(r"\d{2,5}", args[1]):
+                h_clean = args[0].strip('"').strip("'")
+                target_arg = f"{h_clean}:{args[1]}"
+            add_call(rel, ln, "socket", f"socket:{fn}", "TCP", target_arg, win, lines[ln - 1] if ln <= len(lines) else "", file_vars, consumed_lines)
+
+        # 7. Mail calls
+        for m in _MAIL_CALL_OPEN_RE.finditer(text):
+            fn = m.group(1) or m.group(2) or m.group(3) or m.group(4) or m.group(5) or "mail"
+            args, end_p = _call_args(text, m.end() - 1)
+            ln, win = mark_span(m.start(), end_p)
+            first_arg = args[0] if args else ""
+            target_arg = first_arg if fn.startswith("SMTP") else (default_mail_host or first_arg or "smtp")
+            add_call(rel, ln, "mail", f"mail:{fn}", "SMTP", target_arg, win, lines[ln - 1] if ln <= len(lines) else "", file_vars, consumed_lines,
+                     forced_host=default_mail_host, forced_cls="mail", forced_svc="mail")
+
+        # 8. Shell / Cron / Subprocess curl & wget (including curl|sh)
+        for i, line in enumerate(lines, 1):
+            if i in consumed_lines:
+                continue
+            sched = ""
+            cm = _CRON_LINE_RE.match(line) if is_cron_file else None
+            if cm and not line.lstrip().startswith("#"):
+                sched = cm.group(1).strip()
+            for m in _SHELL_CURL_WGET_RE.finditer(line):
+                tool, rest = m.group(1), m.group(2)
+                url_m = URL_ANY_RE.search(rest) or re.search(r"(['\"]?https?://[^\s\"'|;&]+|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?[^\s\"'|;&]*)", rest)
+                if not url_m:
+                    continue
+                target_arg = url_m.group(0).strip("\"'")
+                pipe_exec = bool(_SHELL_PIPE_EXEC_RE.search(line))
+                method = "POST" if re.search(r"(?:^|\s)(?:-X\s*POST|--data|--data-raw|--data-binary|-d\s|-F\s|--post-data)", rest) else "GET"
+                flags = []
+                if pipe_exec:
+                    flags.append("shell-pipe-exec")
+                if is_cron_file or sched:
+                    flags.append("cron")
+                kind = "shell-exec" if pipe_exec else ("cron" if (is_cron_file or sched) else "http")
+                mech = f"sh:{tool}|sh" if pipe_exec else (f"cron:{tool}" if (is_cron_file or sched) else f"sh:{tool}")
+                consumed_lines.add(i)
+                add_call(rel, i, kind, mech, method, target_arg, line, line, file_vars, consumed_lines, extra_flags=flags, schedule=sched)
+
+        # Framework scheduler definitions (e.g. $schedule->exec('curl ...')->everyFiveMinutes())
+        for m in _SCHED_METHOD_RE.finditer(text):
+            ln = text.count("\n", 0, m.start()) + 1
+            if ln in consumed_lines:
+                continue
+            cmd_arg, freq = m.group(1).strip(), m.group(2).strip()
+            add_call(rel, ln, "cron", "scheduler", "CRON", cmd_arg, m.group(0), lines[ln - 1] if ln <= len(lines) else "", file_vars, consumed_lines,
+                     extra_flags=["cron"], schedule=freq)
+
+        # 9. Variable-assigned API action URLs (Telegram /bot.../sendMessage, SMS handler_api.php, AfterShip /v4/trackings, /gate)
+        # when assigned in a code stub or helper whose call happens in another file (and not already consumed above)
+        if is_code:
+            for i, line in enumerate(lines, 1):
+                if i in consumed_lines:
+                    continue
+                for m in URL_ANY_RE.finditer(line):
+                    u = m.group(1).rstrip(".,;:'\")]}")
+                    try:
+                        sp = urlsplit(u)
+                        h = (sp.hostname or "").lower()
+                        pth = sp.path or ""
+                    except ValueError:
+                        continue
+                    if not h or sp.scheme.lower() not in ("http", "https", "wss", "ws", "socks5", "socks4", "socks"):
+                        continue
+                    cls, svc = classify_host(h)
+                    if cls in ("noise", "internal"):
+                        continue
+                    if pth and pth != "/" and (cls in LEAD_CLASSES or cls == "ip" or _LICENSE_BEACON_RE.search(u)):
+                        method = "POST" if re.search(r"sendMessage|sendDocument|sendPhoto|webhook|trackings|/gate|pay|order", u, re.I) else "GET"
+                        kind = "telegram" if svc == "telegram" else ("license/heartbeat" if _LICENSE_BEACON_RE.search(u) else "http")
+                        add_call(rel, i, kind, "url-endpoint", method, u, line, line, file_vars, consumed_lines,
+                                 extra_flags=["cron"] if is_cron_file else None)
+
+        # 10. Inbound webhooks & IPN handlers
+        if is_code:
+            file_routes: list[tuple[int, str, str]] = []
+            for m in _WEBHOOK_ROUTE_RE.finditer(text):
+                ln = text.count("\n", 0, m.start()) + 1
+                method = (m.group(1) or m.group(5) or m.group(7) or "POST").upper()
+                route = m.group(2) or m.group(3) or m.group(4) or m.group(6) or m.group(8) or m.group(9) or rel
+                file_routes.append((ln, method, route))
+
+            wh_hits: list[tuple[int, str, str, str, str, str]] = []
+            seen_wh: set[tuple[str, str]] = set()
+            reads_input = bool(re.search(r"php://input|\$_POST|\$_REQUEST|\$_GET|request\.json|req\.body|->getContent\(|get_json\(|request\.form|request\.POST|request\.body|->request->|->query->|\$request->", text))
+            for rx, kind, cls, svc, ver in (_WEBHOOK_SIG_PATTERNS if reads_input else ()):
+                for m in rx.finditer(text):
+                    ln = text.count("\n", 0, m.start()) + 1
+                    preceding = [(rln, r) for rln, _, r in file_routes if rln <= ln and ln - rln <= 60]
+                    if preceding:
+                        route = max(preceding, key=lambda x: x[0])[1]
+                    else:
+                        nearby = [(abs(rln - ln), r) for rln, _, r in file_routes if abs(rln - ln) <= 30]
+                        route = min(nearby, key=lambda x: x[0])[1] if nearby else rel
+                    if (svc, route) in seen_wh:
+                        continue
+                    seen_wh.add((svc, route))
+                    wh_hits.append((ln, kind, cls, svc, ver, route))
+
+            for rln, rmethod, route in file_routes:
+                if not any(r == route for _, _, _, _, _, r in wh_hits):
+                    cls, svc = "endpoint", "webhook"
+                    for rx, kc, ks in KEY_CLASSES:
+                        if rx.search(route):
+                            cls, svc = kc, ks
+                            break
+                    wh_hits.append((rln, "webhook", cls, svc, "route handler", route))
+
+            if not wh_hits and _WEBHOOK_FILENAME_RE.search(p.name) and re.search(r"php://input|\$_POST|\$_REQUEST|request\.json|req\.body", text):
+                cls, svc = "endpoint", "webhook"
+                for rx, kc, ks in KEY_CLASSES:
+                    if rx.search(p.name) or rx.search(text[:2000]):
+                        cls, svc = kc, ks
+                        break
+                wh_hits.append((1, "ipn" if "ipn" in p.name.lower() else "webhook", cls, svc, "none seen", rel))
+
+            for ln, kind, cls, svc, ver, route in wh_hits:
+                win = "\n".join(lines[max(0, ln - 5):min(len(lines), ln + 30)])
+                fields: list[str] = []
+                for fm in _INPUT_FIELD_RE.finditer(win):
+                    fld = fm.group(1) or fm.group(2) or fm.group(3) or fm.group(4) or ""
+                    if fld and fld not in fields:
+                        fields.append(fld)
+                ckey = ""
+                for it in cfg_idx.get("items") or []:
+                    if it["service"] == svc and svc not in ("", "webhook"):
+                        ckey = it["key"]
+                        break
+                webhooks.append({
+                    "file": rel, "line": ln, "kind": kind, "route_or_script": route, "method": "POST",
+                    "class": cls, "service": svc, "verification": ver,
+                    "payload_fields": ", ".join(fields[:10]), "credential_key": ckey,
+                    "excerpt": (lines[ln - 1] if ln <= len(lines) else lines[0]).strip()[:240],
+                })
+
+    hosts.sort(key=lambda h: (0 if h["class"] in LEAD_CLASSES else 1 if h["class"] in ("ip", "other", "endpoint") else 2, -h["hits"]))
+    log(f"[code] calls: {len(calls)} outbound call(s), {len(webhooks)} inbound webhook/IPN handler(s), {time.time() - t0:.1f} s")
+    return calls, webhooks
+
+
+def build_pivots(
+    repos: list[dict[str, Any]],
+    values: list[dict[str, Any]],
+    history_secrets: list[dict[str, Any]],
+    hosts: list[dict[str, Any]],
+    hits: list[dict[str, Any]],
+    idents: list[dict[str, Any]],
+    calls: list[dict[str, Any]],
+    webhooks: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build the per-provider forensic pivot sheet: one row per external provider / contact joining outbound calls,
+    inbound webhooks, endpoint references, live & historical credentials, account/bot IDs, what's sent, and what
+    records that provider holds."""
+    groups: dict[str, dict[str, Any]] = {}
+
+    def norm_provider(cls: str, svc: str, host: str = "") -> tuple[str, str]:
+        s = (svc or "").strip().lower()
+        c = (cls or "other").strip().lower()
+        generic = {"", "host/url", "webhook", "login", "application secret", "public address", "private address", "local", "service name", "other", "endpoint", "carrier", "shipping", "sms", "payments", "crypto", "mail", "proxy", "cloud storage", "code hosting", "ai api", "geo", "captcha"}
+        if s and s not in generic:
+            return s, (c if c not in ("other", "endpoint") else cls)
+        h = (host or "").strip().lower()
+        if h and not h.startswith("("):
+            base_h = h.split(":")[0] if re.match(r"^[\d.]+:\d+$", h) else h
+            hc, hs = classify_host(base_h)
+            if hs and hs not in generic:
+                return hs, hc
+            return h, (hc if hc != "other" else c)
+        if s:
+            return s, c
+        return h or c or "unknown", c
+
+    def get_group(prov: str, cls: str) -> dict[str, Any]:
+        g = groups.get(prov)
+        if g is None:
+            g = groups[prov] = {
+                "provider": prov, "class": cls or "other", "hosts": set(), "calls": [], "webhooks": [],
+                "hits_n": 0, "methods": set(), "what_sent": [], "cred_keys": [], "creds_masked": [],
+                "accounts": [], "live_creds": 0, "hist_creds": 0, "call_sites": [], "webhook_sites": [],
+            }
+        elif g["class"] in ("other", "endpoint", "info") and cls not in ("other", "endpoint", "info", ""):
+            g["class"] = cls
+        return g
+
+    def add_unique(lst: list[str], item: str, limit: int = 12):
+        if item and item not in lst and len(lst) < limit:
+            lst.append(item)
+
+    # 1. Endpoint hosts
+    for h in hosts:
+        if h["class"] in ("noise", "internal"):
+            continue
+        prov, cls = norm_provider(h["class"], h["service"], h["host"])
+        g = get_group(prov, cls)
+        g["hosts"].add(h["host"])
+        g["hits_n"] += int(h.get("hits") or 0)
+        if h.get("example") and "://" in h["example"]:
+            try:
+                sp = urlsplit(h["example"])
+                if sp.path and sp.path != "/":
+                    add_unique(g["what_sent"], f"{sp.scheme.upper()} {sp.path[:80]}")
+            except ValueError:
+                pass
+
+    # 2. Outbound calls
+    for c in calls:
+        if c["class"] in ("noise", "internal"):
+            continue
+        if (not c["host"] or c["host"].startswith("(")) and c["class"] in ("", "endpoint", "other"):
+            continue                      # an unresolved variable host is a call site to read in calls.csv, not a provider
+        prov, cls = norm_provider(c["class"], c["service"], c["host"])
+        g = get_group(prov, cls)
+        if c["host"] and not c["host"].startswith("("):
+            g["hosts"].add(c["host"])
+        g["calls"].append(c)
+        g["methods"].add(c["method"])
+        add_unique(g["call_sites"], f"{c['file']}:{c['line']}")
+        desc = f"{c['method']} {c['url_or_target'][:80]}"
+        if c.get("payload"):
+            desc += f" ({c['payload'][:100]})"
+        if c.get("resolved_from"):
+            desc += f" [{c['resolved_from'][:60]}]"
+        add_unique(g["what_sent"], desc, 8)
+        tm = re.search(r"(\d{8,12}):[A-Za-z0-9_-]{20,}", c.get("url_or_target") or "")
+        if tm:
+            add_unique(g["accounts"], f"bot_id:{tm.group(1)} ({c['file']}:{c['line']})")
+
+    # 3. Inbound webhooks / IPNs
+    for w in webhooks:
+        prov, cls = norm_provider(w["class"], w["service"], "")
+        g = get_group(prov, cls)
+        g["webhooks"].append(w)
+        g["methods"].add(f"webhook {w['method']}")
+        add_unique(g["webhook_sites"], f"{w['file']}:{w['line']}")
+        wdesc = f"inbound {w['kind']} {w['route_or_script']}"
+        if w.get("payload_fields"):
+            wdesc += f" (fields: {w['payload_fields'][:80]})"
+        if w.get("verification") and w["verification"] != "none seen":
+            wdesc += f" [verify: {w['verification']}]"
+        add_unique(g["what_sent"], wdesc, 8)
+
+    # 4. Live configuration credentials & values
+    for v in values:
+        if v.get("placeholder") or v.get("example") or v["class"] in ("other", "noise", "internal", "database", "auth", "endpoint"):
+            continue
+        host_v = _host_of(v["value"])
+        prov, cls = norm_provider(v["class"], v["service"], host_v)
+        if host_v and (IPV4_RE.fullmatch(host_v) or host_v == "localhost") and classify_host(host_v)[0] == "internal" and prov in (host_v, v["service"], v["class"]):
+            continue                      # a local address in config (127.0.0.1:11434) is not a provider to pivot to
+        g = get_group(prov, cls)
+        if host_v and not IPV4_RE.fullmatch(host_v) or (host_v and not PRIVATE_NET_RE.match(host_v)):
+            if host_v:
+                g["hosts"].add(host_v)
+        g["live_creds"] += 1
+        add_unique(g["cred_keys"], f"{v['file']}: {v['key']}")
+        add_unique(g["creds_masked"], f"{v['key']}={mask(v['value'])}")
+        tm = re.search(r"(\d{8,12}):[A-Za-z0-9_-]{20,}", v["value"])
+        if tm:
+            add_unique(g["accounts"], f"bot_id:{tm.group(1)} ({v['key']})")
+        elif re.search(r"account|merchant|shop_id|client_id|user|login|chat_id|channel|wallet|address|from|perfect_?money", v["key"], re.I) and len(v["value"]) <= 64:
+            add_unique(g["accounts"], f"{v['key']}={v['value']}")
+        elif "://" in v["value"]:
+            dm = DSN_RE.match(v["value"])
+            if dm and dm.group("user"):
+                add_unique(g["accounts"], f"user:{dm.group('user')}@{dm.group('host') or ''}")
+
+    # 5. Historical secrets (removed from working tree or in git history)
+    for h in history_secrets:
+        if h["class"] in ("other", "noise", "internal", "database", "auth", "endpoint"):
+            continue
+        host_v = _host_of(h["value"])
+        prov, cls = norm_provider(h["class"], h["service"], host_v)
+        g = get_group(prov, cls)
+        if host_v and not PRIVATE_NET_RE.match(host_v):
+            g["hosts"].add(host_v)
+        loc = f"{h.get('repo', '')}/{h.get('path', '')}".replace("//", "/")
+        if not h.get("value_still_in_file"):
+            g["hist_creds"] += 1
+            commit_short = (h.get("introduced_by_commit") or "")[:8]
+            add_unique(g["cred_keys"], f"{loc}: {h['key']} [history {commit_short}]")
+            add_unique(g["creds_masked"], f"{h['key']}={mask(h['value'])} [history {commit_short}]")
+        tm = re.search(r"(\d{8,12}):[A-Za-z0-9_-]{20,}", h["value"])
+        if tm:
+            add_unique(g["accounts"], f"bot_id:{tm.group(1)} (history:{h['key']})")
+
+    # 6. Identifiers (inline Telegram tokens & t.me links in code)
+    for i in idents:
+        if i["type"] == "telegram_token":
+            g = get_group("telegram", "messaging")
+            g["hosts"].add("api.telegram.org")
+            bot_id = i["value"].split(":", 1)[0]
+            add_unique(g["accounts"], f"bot_id:{bot_id} ({i['first_file']}:{i['first_line']})")
+            add_unique(g["creds_masked"], f"token={mask(i['value'])} ({i['first_file']}:{i['first_line']})")
+        elif i["type"] == "telegram_link":
+            g = get_group("telegram", "messaging")
+            g["hosts"].add("t.me")
+            add_unique(g["accounts"], i["value"])
+
+    # 7. Git remotes (GitHub / GitLab / Bitbucket / Gitea accounts & tokens in remote URLs)
+    for r in repos:
+        for rem in r.get("remotes") or []:
+            u = rem.get("url") or ""
+            h = _host_of(u)
+            if not h and "@" in u and ":" in u:
+                h = u.split("@", 1)[1].split(":", 1)[0].lower()
+            if not h:
+                continue
+            hc, hs = classify_host(h)
+            if hc in ("noise", "internal"):
+                continue
+            prov, cls = norm_provider(hc, hs, h)
+            g = get_group(prov, cls)
+            g["hosts"].add(h)
+            g["methods"].add("git remote")
+            m_slug = re.search(r"[:/]([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?$", u)
+            if m_slug:
+                add_unique(g["accounts"], f"repo:{m_slug.group(1)}")
+            add_unique(g["what_sent"], f"git remote {rem.get('name', 'origin')} ({r['repo']})")
+            for rx, _, _, note in VALUE_SHAPES_LOOSE:
+                mt = rx.search(u)
+                if mt:
+                    g["live_creds"] += 1
+                    add_unique(g["cred_keys"], f"{r['repo']}/.git/config: remote.{rem.get('name', 'origin')}.url")
+                    add_unique(g["creds_masked"], f"{note}={mask(mt.group(0))}")
+
+    out: list[dict[str, Any]] = []
+    for prov, g in groups.items():
+        has_out = len(g["calls"]) > 0 or g["hits_n"] > 0 or "git remote" in g["methods"]
+        has_in = len(g["webhooks"]) > 0
+        if has_out and has_in:
+            direction = "both"
+        elif has_in:
+            direction = "inbound"
+        elif has_out:
+            direction = "outbound"
+        elif g["live_creds"] > 0:
+            direction = "dormant (config only)"
+        else:
+            direction = "dormant (history only)"
+        history_only = bool(g["hist_creds"] > 0 and g["live_creds"] == 0)
+        out.append({
+            "provider": prov,
+            "class": g["class"],
+            "direction": direction,
+            "hosts": "; ".join(sorted(g["hosts"])[:10]),
+            "calls_n": len(g["calls"]),
+            "webhooks_n": len(g["webhooks"]),
+            "hits_n": g["hits_n"],
+            "methods": ", ".join(sorted(g["methods"])) or ("CONFIG" if not has_out else "REF"),
+            "what_sent": "; ".join(g["what_sent"][:6]) or ("configured credential (no call site in tree)" if not has_out else "endpoint reference"),
+            "credential_keys": "; ".join(g["cred_keys"][:8]) or ("(none in config - inline or unauthenticated)" if (has_out or has_in) else ""),
+            "credentials_masked": "; ".join(g["creds_masked"][:8]),
+            "accounts_or_ids": "; ".join(g["accounts"][:10]),
+            "history_only": history_only,
+            "call_sites": "; ".join(g["call_sites"][:8]),
+            "webhook_sites": "; ".join(g["webhook_sites"][:8]),
+            "provider_holds": provider_holds(g["class"], prov),
+        })
+    out = [r for r in out if not ((IPV4_RE.fullmatch(r["provider"]) or r["provider"] == "localhost") and classify_host(r["provider"])[0] == "internal")]
+    out.sort(key=lambda r: (
+        0 if r["class"] in LEAD_CLASSES else (1 if r["class"] in ("ip", "endpoint") else 2),
+        -(r["calls_n"] + r["webhooks_n"] + (2 if r["credential_keys"] and not r["credential_keys"].startswith("(") else 0)),
+        -r["hits_n"],
+        r["provider"],
+    ))
+    return out
+
+
 # ------------------------------------------------------------------------------------------------ repositories
 def find_repos(root: Path, log: Log) -> list[Path]:
     """Every .git directory (or gitdir file) under the root, bounded."""
@@ -1028,7 +2302,7 @@ def read_repo(root: Path, dotgit: Path, tmp: Path, log: Log, acc: "Acc") -> dict
                 for r in harvest_text(Path(path).name, text):
                     if r["placeholder"]:
                         continue
-                    still = bool(current) and r["value"] in current
+                    still = bool(current) and bool(re.search(r"(?<![A-Za-z0-9_])" + re.escape(r["value"]) + r"(?![A-Za-z0-9_])", current))
                     acc.history_secrets.append({"repo": rel, "path": path, "blob": sha, "introduced_by_commit": commit, "introduced_by": email, "introduced_at": date, "key": r["key"],
                                                 "value": r["value"][:2000], "class": r["class"], "service": r["service"], "note": r["note"], "file_still_present": present,
                                                 "value_still_in_file": still})
@@ -1163,6 +2437,8 @@ def run(case, log: Log = print, root: Optional[Path] = None, out_root: Optional[
                 f"{time.time() - t1:.0f} s" + (f"; {'; '.join(info['errors'])}" if info["errors"] else ""))
         values, dbs = harvest_config(root, log)
         hosts, hits, idents = scan_endpoints(root, log)
+        calls, webhooks = scan_calls(root, values, acc.history_secrets, hosts, hits, idents, log)
+        pivots = build_pivots(repos, values, acc.history_secrets, hosts, hits, idents, calls, webhooks)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     # which dump belongs to which application: database names in the configuration vs the case's exports
@@ -1219,6 +2495,9 @@ def run(case, log: Log = print, root: Optional[Path] = None, out_root: Optional[
     table("config", "export_links", links, ["file", "key", "database", "export", "host", "user"])
     table("code", "endpoints", hosts, ["host", "class", "service", "hits", "files_n", "files", "first_file", "first_line", "example", "schemes"])
     table("code", "endpoint_hits", hits, ["host", "class", "service", "url", "file", "line", "excerpt", "how"])
+    table("code", "calls", calls, ["file", "line", "kind", "mechanism", "method", "host", "url_or_target", "class", "service", "resolved_from", "payload", "credential_key", "flags", "excerpt"])
+    table("code", "webhooks", webhooks, ["file", "line", "kind", "route_or_script", "method", "class", "service", "verification", "payload_fields", "credential_key", "excerpt"])
+    table("code", "pivots", pivots, ["provider", "class", "direction", "hosts", "calls_n", "webhooks_n", "hits_n", "methods", "what_sent", "credential_keys", "credentials_masked", "accounts_or_ids", "history_only", "call_sites", "webhook_sites", "provider_holds"])
     table("code", "identifiers", idents, ["type", "value", "norm", "count", "first_file", "first_line", "files"])
     summary = {"kind": "code", "source": str(root), "rel": root.name, "out": str(out), "name": name, "generated": utc_now(), "tables": tables, "tables_total": len(tables),
                "rows_total": sum(t["rows"] for t in tables), "repos": repos, "seconds": round(time.time() - t0, 1), "custody_head": list(case.custody.head())}
@@ -1231,7 +2510,7 @@ def run(case, log: Log = print, root: Optional[Path] = None, out_root: Optional[
     (out / "README.txt").write_text(_readme(summary), "utf-8")
     # findings
     findings = [f for f in case.read_findings() if not str(f.get("rule", "")).startswith("code.")]
-    new = _findings(root, repos, values, dbs, links, hosts, idents, acc)
+    new = _findings(root, repos, values, dbs, links, hosts, idents, acc, calls=calls, webhooks=webhooks, pivots=pivots)
     findings.extend(f.to_dict() for f in new)
     case.write_findings(findings)
     try:
@@ -1241,12 +2520,14 @@ def run(case, log: Log = print, root: Optional[Path] = None, out_root: Optional[
         pass
     code = {"generated": utc_now(), "root": str(root), "export": name, "out": str(out), "repos": repos, "config_values": len(values), "databases": len(dbs), "export_links": links,
             "endpoints": len(hosts), "lead_hosts": [h for h in hosts if h["class"] in LEAD_CLASSES][:200], "public_ips": [h for h in hosts if h["class"] == "ip"][:100],
+            "calls": len(calls), "webhooks": len(webhooks), "pivots": len(pivots), "call_rows": calls[:200], "webhook_rows": webhooks[:100], "pivot_rows": pivots[:200],
             "identifiers": len(idents), "history_secrets": len(acc.history_secrets), "findings": len(new), "seconds": round(time.time() - t0, 1)}
     code["report"] = explain(code, values, authors)
     case.write_json("code.json", code)
-    case.custody.append("code_read", {"root": str(root), "repos": len(repos), "commits": len(acc.commits), "config_values": len(values), "endpoints": len(hosts), "findings": len(new),
-                                      "export": name})
-    log(f"[code] done in {code['seconds']} s: {len(repos)} repositories, {len(acc.commits)} commits, {len(values)} configuration values, {len(hosts)} hosts, {len(new)} findings -> {out}")
+    case.custody.append("code_read", {"root": str(root), "repos": len(repos), "commits": len(acc.commits), "config_values": len(values), "endpoints": len(hosts),
+                                      "calls": len(calls), "webhooks": len(webhooks), "pivots": len(pivots), "findings": len(new), "export": name})
+    log(f"[code] done in {code['seconds']} s: {len(repos)} repositories, {len(acc.commits)} commits, {len(values)} configuration values, {len(hosts)} hosts, "
+        f"{len(calls)} calls, {len(webhooks)} webhooks, {len(pivots)} pivots, {len(new)} findings -> {out}")
     return code
 
 
@@ -1273,11 +2554,14 @@ def _readme(summary: dict[str, Any]) -> str:
             "config/export_links.csv  configuration database names that match an extracted database of this case\n"
             "code/endpoints.csv       every host the code refers to, classified (noise = documentation/CDN/schema links)\n"
             "code/endpoint_hits.csv   each reference with file and line\n"
+            "code/calls.csv           outbound call sites (curl/fetch/requests, sockets, mail, curl|sh, Telegram/Discord, license/heartbeat, cron), with variable hosts resolved from config\n"
+            "code/webhooks.csv        inbound webhook / IPN / callback handlers with route, signature verification and payload fields\n"
+            "code/pivots.csv          per-provider pivot sheet: hosts, direction, what is sent, which credential/account it uses (live and historical), and what that provider holds\n"
             "code/identifiers.csv     e-mails, wallets, handles, Telegram links/tokens, public IPs in code and configuration\n\n"
             "The repositories were read with git against a shadow directory: the seized .git/config was never loaded and nothing was written into the evidence.\n")
 
 
-def _findings(root: Path, repos, values, dbs, links, hosts, idents, acc: Acc) -> list[Finding]:
+def _findings(root: Path, repos, values, dbs, links, hosts, idents, acc: Acc, calls=None, webhooks=None, pivots=None) -> list[Finding]:
     out: list[Finding] = []
     for r in repos:
         rem = ", ".join(f"{x['name']}={x['url']}" for x in r["remotes"][:3]) or "no remote configured"
@@ -1349,12 +2633,51 @@ def _findings(root: Path, repos, values, dbs, links, hosts, idents, acc: Acc) ->
     for v in pk[:20]:
         out.append(Finding(source="code", severity="medium", rule="code.private_key", title=f"Private key material in {v['file']}", description=v["key"], path=v["file"], line=v["line"],
                            tags=["code", "key"]))
+    for c in (calls or []):
+        fl = c.get("flags") or ""
+        if "shell-pipe-exec" in fl:
+            out.append(Finding(source="code", severity="high", rule="code.shell_fetch_exec",
+                               title=f"Remote script fetched and piped to an interpreter in {c['file']}:{c['line']} ({c['mechanism']} -> {c['host']})",
+                               description=f"Target {c['url_or_target']}" + (f" (resolved from {c['resolved_from']})" if c.get("resolved_from") else "")
+                                           + f"; excerpt: {c['excerpt']}. Full row in code/calls.csv.",
+                               path=c["file"], line=c["line"], tags=["code", "call", "shell-exec"]))
+        elif "license-check" in fl or "heartbeat" in fl:
+            out.append(Finding(source="code", severity="medium", rule="code.license_or_beacon",
+                               title=f"License / heartbeat / beacon call in {c['file']}:{c['line']}: {c['method']} {c['host']} ({c['mechanism']})",
+                               description=f"Target {c['url_or_target']}" + (f" [resolved from {c['resolved_from']}]" if c.get("resolved_from") else "")
+                                           + (f"; sends {c['payload']}" if c.get("payload") else "") + f". Excerpt: {c['excerpt']}",
+                               path=c["file"], line=c["line"], tags=["code", "call", "beacon"]))
+    var_calls = [c for c in (calls or []) if "variable-host" in (c.get("flags") or "") and not c["host"].startswith("(")]
+    for c in var_calls[:40]:
+        out.append(Finding(source="code", severity="low", rule="code.variable_host_call",
+                           title=f"Call to variable-configured host {c['host']} ({c['service'] or c['class']}) in {c['file']}:{c['line']}",
+                           description=f"{c['mechanism']} {c['method']} {c['url_or_target']} — resolved via {c['resolved_from']}"
+                                       + (f"; payload: {c['payload']}" if c.get("payload") else "")
+                                       + (f"; credential: {c['credential_key']}" if c.get("credential_key") else "") + ".",
+                           path=c["file"], line=c["line"], tags=["code", "call", "variable-host", c["class"]]))
+    for w in (webhooks or [])[:40]:
+        out.append(Finding(source="code", severity="low", rule="code.webhook_handler",
+                           title=f"Inbound {w['kind']} handler {w['route_or_script']} ({w['service'] or w['class']}) at {w['file']}:{w['line']}",
+                           description=f"Verification: {w['verification']}" + (f"; payload fields: {w['payload_fields']}" if w.get("payload_fields") else "")
+                                       + (f"; config secret: {w['credential_key']}" if w.get("credential_key") else "") + ". All handlers in code/webhooks.csv.",
+                           path=w["file"], line=w["line"], tags=["code", "webhook", w["class"]]))
+    for pv in [p for p in (pivots or []) if p["class"] in LEAD_CLASSES or p["calls_n"] > 0 or p["webhooks_n"] > 0][:50]:
+        first_loc = (pv["call_sites"] or pv["webhook_sites"] or "").split(";")[0].strip()
+        f_path = first_loc.rsplit(":", 1)[0] if ":" in first_loc else ""
+        f_line = int(first_loc.rsplit(":", 1)[1]) if ":" in first_loc and first_loc.rsplit(":", 1)[1].isdigit() else None
+        out.append(Finding(source="code", severity="low" if pv["class"] in LEAD_CLASSES else "info", rule="code.pivot",
+                           title=f"Provider pivot [{pv['provider']}] ({pv['class']}, {pv['direction']}): {pv['calls_n']} call(s), {pv['webhooks_n']} webhook(s)",
+                           description=f"Hosts: {pv['hosts'] or '-'}. What is sent/received: {pv['what_sent']}. "
+                                       f"Credentials: {pv['credentials_masked'] or pv['credential_keys'] or 'none'}. "
+                                       + (f"Accounts/IDs: {pv['accounts_or_ids']}. " if pv.get("accounts_or_ids") else "")
+                                       + f"What the provider holds: {pv['provider_holds']}. Full sheet in code/pivots.csv.",
+                           path=f_path or None, line=f_line, tags=["code", "pivot", pv["class"]], extra=pv))
     return out
 
 
 def explain(code: dict[str, Any], values: Optional[list[dict[str, Any]]] = None, authors: Optional[list[dict[str, Any]]] = None) -> str:
     L = [f"SOURCE CODE under {code['root']} ({code['seconds']} s): {len(code['repos'])} repositories, {code['config_values']} configuration values, {code['endpoints']} hosts, "
-         f"{code['identifiers']} identifiers -> export {code['export']}"]
+         f"{code.get('calls', 0)} calls, {code.get('webhooks', 0)} webhooks, {code.get('pivots', 0)} provider pivots, {code['identifiers']} identifiers -> export {code['export']}"]
     for r in code["repos"]:
         L.append(f"  {r['repo']}: {r['commits']} commits ({r['reflog_only']} reflog-only), {r['authors']} authors, {r['first_commit'][:10]} .. {r['last_commit'][:10]}; branch {r['branch'] or '?'}"
                  + (f"; remotes {', '.join(x['url'] for x in r['remotes'][:3])}" if r["remotes"] else "; no remote") + (f"; {r['deleted']} deletions" if r["deleted"] else "")
@@ -1374,6 +2697,26 @@ def explain(code: dict[str, Any], values: Optional[list[dict[str, Any]]] = None,
         L.append("  services the code talks to: " + "; ".join(f"{h['host']} [{h['service'] or h['class']}] x{h['hits']}" for h in code["lead_hosts"][:25]))
     if code.get("public_ips"):
         L.append("  public IPs in the code: " + ", ".join(h["host"] for h in code["public_ips"][:20]))
+    if code.get("call_rows"):
+        L.append(f"  outbound calls ({code.get('calls', len(code['call_rows']))}): " + "; ".join(
+            f"{c['file']}:{c['line']} {c['mechanism']} {c['method']} {c['host']}"
+            + (f" [{c['resolved_from']}]" if c.get("resolved_from") else "")
+            + (f" ({c['payload']})" if c.get("payload") else "")
+            + (f" <{c['flags']}>" if c.get("flags") else "")
+            for c in code["call_rows"][:18]
+        ))
+    if code.get("webhook_rows"):
+        L.append(f"  inbound webhooks / IPN handlers ({code.get('webhooks', len(code['webhook_rows']))}): " + "; ".join(
+            f"{w['file']}:{w['line']} {w['route_or_script']} [{w['service'] or w['class']}] verify={w['verification']} fields={w['payload_fields'] or '-'}"
+            for w in code["webhook_rows"][:15]
+        ))
+    if code.get("pivot_rows"):
+        L.append(f"  per-provider pivot sheet ({code.get('pivots', len(code['pivot_rows']))}):")
+        for pv in code["pivot_rows"][:25]:
+            L.append(f"    - {pv['provider']} [{pv['class']}, {pv['direction']}] hosts={pv['hosts'] or '-'} | sent={pv['what_sent'][:120]} | "
+                     f"creds={pv['credentials_masked'] or pv['credential_keys'] or 'none'}"
+                     + (f" | ids={pv['accounts_or_ids']}" if pv.get("accounts_or_ids") else "")
+                     + f" | holds: {pv['provider_holds']}")
     return "\n".join(L)
 
 
