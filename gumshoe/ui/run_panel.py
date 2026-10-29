@@ -214,7 +214,14 @@ def render_mount(root: Path):
         rc, out = _run(["bash", script, "--umount"])
         (st.success if rc == 0 else st.warning)(out or f"exit {rc}")
     mp = (st.session_state.get("mount_target") or "/mnt/evidence").strip()
-    if Path(mp).is_dir() and any(Path(mp).iterdir()):
+    try:
+        populated = Path(mp).is_dir() and any(Path(mp).iterdir())
+    except OSError as e:                       # EIO / ENOTCONN: the mount under it is gone (drive or share disconnected, loop device
+        populated = False                      # lost, WSL restarted) - say so instead of taking the whole page down
+        st.error(f"`{mp}` cannot be read ({e.strerror or e}). The evidence underneath the mount point has gone away: the image file's drive or "
+                 "share disconnected, WSL restarted, or the mount was torn down. Unmount, check the drive/share is reachable (Hopper -> Folders), "
+                 "then Remount (`gumshoe remount --case <id>`); a case already collected keeps its findings and CSVs.")
+    if populated:
         render_evidence_check(mp, expanded=bool(st.session_state.pop("mount_check", False)))
 
 

@@ -243,7 +243,12 @@ with tabs[6]:
         show_preview(st.session_state.browse_path, "br" + str(abs(hash(st.session_state.browse_path))))
     else:
         entries = []
-        for p in sorted(base.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower()))[:3000]:
+        try:
+            listing = sorted(base.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower()))[:3000]
+        except OSError as e:
+            st.error(f"cannot read `{base}` ({e.strerror or e}): the mount underneath has gone away - remount the case (Run tab, or `gumshoe remount`)")
+            listing = []
+        for p in listing:
             try:
                 s = stat_times(p)
                 entries.append({"name": p.name + ("/" if p.is_dir() else ""), "size": str(s["size"]) if p.is_file() else "", "mtime": s["mtime"],
