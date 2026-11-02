@@ -9,6 +9,8 @@
 #   mount_image image.raw --part 1 --at /www            # add a 2nd volume on top of the mounted root
 #   mount_image data.raw --lv datavg/www --at /www      # (same image or another one; e.g. a data disk at /www)
 #   mount_image image.raw --list                        # volumes in the image (fs, UUID, label, size); mounts nothing
+#   mount_image image.raw --replay | --no-replay        # replay the journal into a throw-away snapshot (default when the
+#                                                       # filesystem says it needs recovery; the image is never written)
 #   mount_image --umount                                # undo everything
 #
 # Read-only at every layer: the loop device is read-only, LVM is told to activate the volume group
@@ -21,8 +23,9 @@ TARGET=/mnt/evidence; EWF=/mnt/ewf; PART=""; LV=""; IMG=""; AT=""; LIST=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --umount) IMG=UMOUNT;; --target) TARGET="$2"; shift;; --part) PART="$2"; shift;; --lv) LV="$2"; shift;; --at) AT="$2"; shift;;
+    --replay) REPLAY=1;; --no-replay) REPLAY=0;;
     --list) LIST=1;;
-    -h|--help) sed -n 2,13p "$0"; exit 0;;
+    -h|--help) sed -n 2,15p "$0"; exit 0;;
     *) IMG="$1";;
   esac; shift
 done
@@ -51,12 +54,16 @@ if [ "$IMG" = "UMOUNT" ]; then
   for vg in ${VG:-} $(lvm vgs --noheadings -o vg_name --config "$(lvm_cfg)" 2>/dev/null); do
     VG="$vg"; lvmc vgchange -an "$vg" >/dev/null 2>&1 && echo "deactivated VG $vg"
   done
+  for sn in ${SNAPS:-} $(dmsetup ls --target snapshot 2>/dev/null | awk '/^gumshoe-snap/{print $1}'); do
+    dmsetup remove "$sn" >/dev/null 2>&1 && echo "removed journal-replay snapshot $sn"
+  done
   for l in ${LOOPDEV:-} $(losetup -ln 2>/dev/null | awk '{print $1}'); do
     [ -e "$l" ] || continue
     kpartx -d "$l" >/dev/null 2>&1
     losetup -d "$l" 2>/dev/null && echo "released $l"
   done
   for n in ${NBD:-} /dev/nbd0 /dev/nbd1; do [ -e "$n" ] && qemu-nbd --disconnect "$n" >/dev/null 2>&1 && echo "disconnected $n"; done
+  for c in /opt/dfir/work/snapshots/*.cow; do [ -f "$c" ] && rm -f "$c" && echo "removed journal-replay COW $c"; done
   for e in "$EWF" /mnt/ewf /mnt/ewf2; do mountpoint -q "$e" 2>/dev/null && fusermount -u "$e" 2>/dev/null && echo "unmounted $e"; done
   rm -f "$STATE"; exit 0
 fi
@@ -178,7 +185,7 @@ fi
 
 save_state(){  # %q: paths with spaces survive being sourced back
   if [ -n "$AT" ]; then printf 'EXTRA_%s=%q\n' "$(date +%s)" "$MOUNT_AT|$IMG|$LOOPDEV|$NBD|$VG" >> "$STATE"
-  else printf 'TARGET=%q\nEWF=%q\nLOOPDEV=%q\nNBD=%q\nVG=%q\nPARTS=%q\nIMAGE=%q\n' "$TARGET" "$EWF" "$LOOPDEV" "$NBD" "$VG" "$PARTS" "$IMG" > "$STATE"; fi
+  else printf 'TARGET=%q\nEWF=%q\nLOOPDEV=%q\nNBD=%q\nVG=%q\nPARTS=%q\nIMAGE=%q\nSNAPS=%q\nREPLAY=%q\n' "$TARGET" "$EWF" "$LOOPDEV" "$NBD" "$VG" "$PARTS" "$IMG" "${SNAPS:-}" "${REPLAY:-0}" > "$STATE"; fi
 }
 cleanup_fail(){ save_state; echo "   (devices left attached so you can inspect them; undo with: $0 --umount)"; }
 
@@ -235,12 +242,42 @@ else
 fi
 FST=$(blkid -o value -s TYPE "$DEV" 2>/dev/null || echo "")
 OPTS="ro,noatime,noexec,nosuid"
-case "$FST" in ext4|ext3) OPTS="$OPTS,noload";; xfs) OPTS="$OPTS,norecovery";; esac
+# An image taken from a running or unclean server has a journal that was never written back: with noload (no
+# replay, nothing ever written to the image) the directories and files changed just before the image was taken read
+# as "Input/output error". When the filesystem says it needs recovery, the journal is replayed into a THROW-AWAY
+# device-mapper snapshot whose writes land in a sparse COW file under the work folder - the image file itself stays
+# read-only and untouched (losetup --read-only), and the mount is still ro. --no-replay keeps the raw, unreplayed view.
+NEEDS=0
+case "$FST" in
+  ext4|ext3) dumpe2fs -h "$DEV" 2>/dev/null | grep -q "needs_recovery" && NEEDS=1;;
+  xfs) xfs_db -r -c "sb 0" -c "print logstart" "$DEV" >/dev/null 2>&1 && NEEDS=0;;    # xfs: no cheap dirty-log test; --replay to force
+esac
+[ -z "${REPLAY:-}" ] && REPLAY=$NEEDS
+if [ "$REPLAY" = 1 ]; then
+  SNAPDIR=/opt/dfir/work/snapshots; mkdir -p "$SNAPDIR"
+  COW="$SNAPDIR/$(basename "$MOUNT_AT")-$(date +%s).cow"; truncate -s 8G "$COW"
+  COWDEV=$(losetup --find --show "$COW") || { cleanup_fail; die "losetup for the snapshot COW file failed"; }
+  SNAP="gumshoe-snap-$(basename "$MOUNT_AT")-$$"
+  if dmsetup create "$SNAP" --table "0 $(blockdev --getsz "$DEV") snapshot $DEV $COWDEV N 8" 2>/dev/null; then
+    SNAPS="${SNAPS:-} $SNAP"; ORIGDEV="$DEV"; DEV="/dev/mapper/$SNAP"
+    echo "== journal replay: filesystem on $ORIGDEV needs recovery; mounting a snapshot ($DEV, COW $COW) so the journal is replayed there - the image is not written"
+  else
+    losetup -d "$COWDEV" 2>/dev/null; rm -f "$COW"
+    echo "!! journal-replay snapshot could not be created (dm-snapshot missing?); mounting raw with noload - paths changed just before imaging may read as I/O errors"
+    REPLAY=0
+  fi
+elif [ "$NEEDS" = 1 ]; then
+  echo "!! the filesystem needs journal recovery and --no-replay was given: paths changed just before imaging may read as I/O errors"
+fi
+case "$FST" in
+  ext4|ext3) [ "$REPLAY" = 1 ] || OPTS="$OPTS,noload";;
+  xfs) [ "$REPLAY" = 1 ] || OPTS="$OPTS,norecovery";;
+esac
 if ! out=$(mount -t "${FST:-auto}" -o "$OPTS" "$DEV" "$MOUNT_AT" 2>&1); then
   echo "$out"; cleanup_fail; die "mount of $DEV (${FST:-unknown fs}) failed" 32
 fi
 save_state
-echo "== mounted $DEV ($FST) at $MOUNT_AT with $OPTS"
+echo "== mounted $DEV ($FST) at $MOUNT_AT with $OPTS$( [ "$REPLAY" = 1 ] && echo ", journal replayed into snapshot (image untouched)")"
 grep " $MOUNT_AT " /proc/mounts
 if [ -n "$AT" ]; then echo "next: run Collect (or Re-analyze) again so the added volume is read"
 else echo "next: create the case in the UI (mount root $TARGET), then Verify"; fi

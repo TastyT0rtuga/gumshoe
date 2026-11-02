@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **Unclean images: the journal is replayed into a throw-away snapshot; the image is never written.** A server imaged
+  while running (or after a crash) has an ext4/XFS journal that was never written back. Mounted with `noload` /
+  `norecovery` - the only way to guarantee nothing is ever written to the evidence - the directories and files changed
+  just before imaging read as `Input/output error`, and Collect died on the first one (`/www/wwwroot`). The mount script
+  now checks `needs_recovery`; when set, it creates a device-mapper snapshot over the read-only loop device with a
+  sparse COW file under the work folder and mounts *that*: the kernel replays the journal into the COW file, the
+  image stays `losetup --read-only` and untouched, the mount is still `ro`, and the mount line / custody record say
+  "journal replayed into snapshot". `--no-replay` keeps the raw unreplayed view; `--replay` forces it; without
+  dm-snapshot it falls back to `noload` with a warning. Unmount removes the snapshot and the COW file.
+- **Collect survives a failing tool.** A runner raising (an unreadable path, a crash) is recorded (`tool_failed`
+  custody record, the traceback in the log) and the next tool runs; Loki skips a path the kernel cannot stat and says
+  why instead of taking the whole collection down.
 - **Source code intake: repositories, configuration and the services the code talks to** (`gumshoe code`, Run tab
   "Read the source code", and automatic for a dropped repository or `source_code` folder). A legal return or an
   image often carries the server's own code - git repositories, `.env` files, framework config - and that code names

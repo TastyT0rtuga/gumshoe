@@ -132,8 +132,13 @@ def run_loki(case) -> dict[str, Any]:
     for rel in case.cfg["paths"]["web_roots"] + case.cfg["paths"]["temp_dirs"] + ["root", "home", "opt", "var/www",
                                                                                      case.cfg["paths"]["panel"]] + case.cfg["paths"]["mariadb_plugin"]:
         p = case.abs(rel)
-        if p.exists():
-            targets.append(p)
+        try:
+            if p.exists():
+                targets.append(p)
+        except OSError as e:               # EIO on an unclean image mounted without journal replay, a vanished mount
+            case.custody.append("path_unreadable", {"path": rel, "error": str(e)})
+            print(f"[tools] loki: {rel} cannot be read ({e.strerror or e}); skipped - an unclean image mounted without journal "
+                  "replay reads this way: Unmount, then Remount (the mount script now replays the journal into a throw-away snapshot)")
     recs = []
     base = [binary] if not binary.endswith(".py") else [sys.executable, binary]
     cwd = Path(binary).parent if binary.endswith(".py") else None

@@ -98,6 +98,8 @@ If that is refused, map it to a drive letter in Windows or copy the item into th
     attached disk) — it lists the partitions, activates LVM if present, picks the root filesystem, and
     mounts it at `/mnt/evidence` with `ro,noatime,noexec,nosuid,noload`. It also takes an E01 directly
     (`sudo setup/wsl/mount_image.sh /mnt/d/case/server.E01`, no Arsenal needed) or a VHDX. Use
+    If the mount line says "journal replayed into snapshot", the image was taken unclean: the journal was
+    replayed into a COW file under the work folder, never into the image (`--no-replay` for the raw view).
     `--part N` / `--lv VG/LV` when it picks wrong; `sudo setup/wsl/mount_image.sh --umount` undoes it.
     The UI's "What is on /mnt/evidence?" box (shown right after a mount) tells you whether this is the
     root filesystem, which OS/host it is, and whether aaPanel is on it. If the original server kept
