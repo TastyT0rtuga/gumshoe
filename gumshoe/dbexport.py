@@ -62,7 +62,7 @@ def slug(s: str, limit: int = 80) -> str:
 
 
 def export_name(source: dict[str, Any]) -> str:
-    """The folder name of a source's export: its file name under its parent folder (db-dump_sw.sql) plus a short hash of
+    """The folder name of a source's export: its file name under its parent folder (db-dump.sql) plus a short hash of
     the full path, so nine dumps under one long case path get nine folders (build f truncated the path and they
     overwrote each other)."""
     import hashlib

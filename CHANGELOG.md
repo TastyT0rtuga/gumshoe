@@ -173,7 +173,7 @@
 - **Databases to CSV: fixes for the 12 GB dump that "gave nothing back".** (1) Export folders were named after the
   source's path truncated to 60 characters, so nine dumps under one long case path shared one folder and each
   extraction wiped the previous one - the 12 GB dump's tables were deleted by the 368-byte migration extracted
-  after it, and Players/Databases showed 0. Folders are now `<parent>-<file>-<hash of the path>` (`db-dump_sw.sql-341566`),
+  after it, and Players/Databases showed 0. Folders are now `<parent>-<file>-<hash of the path>` (`db-dump.sql-341566`),
   never shared, never overwritten by another source; the old shared folder is removed on re-extraction.
   (2) The MySQL dump reader streams bytes instead of lines: no line, statement or table has to fit in memory (a
   table kept on one 3 GB line, one INSERT with millions of rows, a 60 MB cell: 220 MB peak), identical rows to the

@@ -192,7 +192,7 @@ never written as data). A cell longer than Excel's limit (32,767 characters) is 
 `<table>.blobs\rowN.column.txt` with a pointer in the cell; binary cells likewise. A row whose number of values
 differs from the table's columns is kept in `<table>.rejected.csv` and counted (`rejected` in tables.csv) - never
 written shifted into the table. Each source gets its own folder named `<parent>-<file>-<hash>`
-(`db-dump_sw.sql-341566`), so dumps that share a long path never overwrite each other. The extraction log says
+(`db-dump.sql-341566`), so dumps that share a long path never overwrite each other. The extraction log says
 what the reader recognised (INSERTs, CREATE TABLEs, other statements skipped, malformed); if a `.sql` yields 0
 tables, send its first lines (`head -c 2000`) so the dialect can be added. A row the reader cannot make sense
 of is skipped and logged with its position (the rest of the statement is still read); an extraction that
