@@ -72,9 +72,13 @@ def iter_log_files(case) -> Iterator[tuple[str, Path]]:
     seen = set()
     for base in case.cfg["paths"]["web_logs"] + ["var/log/nginx", "var/log/apache2"]:
         root = case.abs(base)
-        if not root.exists():
+        try:
+            if not root.exists():
+                continue
+            entries = sorted(root.iterdir())
+        except OSError:                    # EIO on a damaged or unreplayed image: this directory is skipped, the rest are read
             continue
-        for p in sorted(root.iterdir()):
+        for p in entries:
             if not p.is_file():
                 continue
             name = p.name

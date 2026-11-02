@@ -68,8 +68,12 @@ def run_tools(case, tools: Optional[list[str]] = None, skip: Optional[list[str]]
             log(f"[tools] {name} FAILED: {type(e).__name__}: {e}\n" + traceback.format_exc(limit=4) + "[tools] continuing with the next tool")
     if needs_conversion:
         log("[tools] converting web and auth logs to JSONL for Chainsaw ...")
-        weblog2jsonl.run(case)
-        authlog2jsonl.run(case)
+        for conv in (weblog2jsonl, authlog2jsonl):
+            try:
+                conv.run(case)
+            except Exception as e:  # noqa: BLE001 - an unreadable log directory (EIO) must not end the collection
+                case.custody.append("tool_failed", {"tool": conv.__name__.rsplit(".", 1)[-1], "error": f"{type(e).__name__}: {str(e)[:300]}"})
+                log(f"[tools] {conv.__name__.rsplit('.', 1)[-1]} FAILED: {type(e).__name__}: {e}; continuing")
         try:
             results["chainsaw"] = RUNNERS["chainsaw"](case)
             log("[tools] chainsaw done")

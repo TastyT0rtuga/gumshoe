@@ -51,11 +51,18 @@ def parse_line(line: str, default_year: int) -> Optional[dict[str, Any]]:
 
 def iter_auth_files(case):
     vl = case.abs(case.cfg["paths"]["var_log"])
-    if not vl.exists():
+    try:
+        if not vl.exists():
+            return
+        entries = sorted(vl.iterdir())
+    except OSError:                        # EIO on a damaged or unreplayed image
         return
-    for p in sorted(vl.iterdir()):
-        if p.is_file() and (p.name.startswith("auth.log") or p.name.startswith("secure")):
-            yield p
+    for p in entries:
+        try:
+            if p.is_file() and (p.name.startswith("auth.log") or p.name.startswith("secure")):
+                yield p
+        except OSError:
+            continue
 
 
 def run(case) -> list[Finding]:
